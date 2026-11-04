@@ -1,0 +1,55 @@
+server:
+  # 8080 被本机另一个服务（CIMDemo）占用；14975 会被宿主环境变量 SERVER__PORT 覆盖，避开
+  port: 8081
+  # 前端开发环境的 baseURL 是 /api（VITE_GLOB_API_URL），用 context-path 一次对齐，
+  # Controller 里的映射就写 /auth/login，与 mock 清单的路径字面一致
+  servlet:
+    context-path: /api
+
+spring:
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    # WAL 提升读并发；busy_timeout 防止并发写直接报 database is locked（09 清单第八节）
+    # 写事务保持短小是纪律：单写库，长事务会阻塞所有人
+    # 注意：data 目录必须事先存在（SQLite JDBC 不建父目录），首次 clone 后先 mkdir data
+    url: jdbc:sqlite:./data/cim.db?journal_mode=WAL&busy_timeout=5000
+  servlet:
+    multipart:
+      # Spring Boot 默认单文件 1MB，附件一放就炸；这里与 cim.upload-max-mb 保持同值
+      # max-request-size 留出余量给表单字段（attachType 等），不是只传文件
+      max-file-size: 50MB
+      max-request-size: 60MB
+
+mybatis-plus:
+  configuration:
+    # 全表字段都是小写下划线，开驼峰映射后实体直接用驼峰字段名
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      # 主键是应用层生成的 32 位字符串（03 第三节），不用数据库自增，不让 MP 生成
+      id-type: input
+
+cim:
+  jwt:
+    # 密钥默认只用于本地开发；生产环境必须用环境变量注入，绝不把真密钥提交进 git（03 4.4.1）
+    access-secret: ${CIM_JWT_SECRET:dev-only-access-secret-change-me-in-production-0001}
+    refresh-secret: ${CIM_JWT_REFRESH_SECRET:dev-only-refresh-secret-change-me-in-production-0002}
+    # accessToken 7 天（对齐 mock 契约）；refreshToken 30 天
+    access-hours: 168
+    refresh-hours: 720
+    # 本地 http 下 secure Cookie 写不进去，开发必须 false；上生产（HTTPS）改 true
+    cookie-secure: false
+  # 附件存文件系统、库里只放相对路径（07 第五节）
+  # upload-dir 换成绝对路径部署时也不会出错；相对路径以进程工作目录为基准
+  upload-dir: ./data/attachments
+  # 单文件上限，必须与 spring.servlet.multipart.max-file-size 一致，
+  # 否则会出现「容器放行、业务层拒绝」或反之的错位提示
+  upload-max-mb: 50
+  auth:
+    # 新用户初始口令 / 管理员重置后的口令。首次登录强制改密，生产必须用环境变量覆盖
+    default-password: ${CIM_DEFAULT_PASSWORD:Cim#Init2026}
+
+logging:
+  level:
+    com.cim.reqflow: INFO
