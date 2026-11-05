@@ -45,6 +45,7 @@ import {
 
 import TicketActions from './components/ticket-actions.vue';
 import TicketSteps from './components/ticket-steps.vue';
+import TicketConfirmProgress from './components/ticket-confirm-progress.vue';
 import TicketAttachments from './components/ticket-attachments.vue';
 import TicketBasic from './components/ticket-basic.vue';
 import TicketContent from './components/ticket-content.vue';
@@ -121,7 +122,9 @@ async function 执行动作(载荷: TicketActionParams) {
   提交中.value = true;
   try {
     const 结果 = await submitTicketActionApi(单据id.value, 载荷);
-    message.success(`已${结果.statusLabel}`);
+    // 提示语由后端按动作语义生成（并行确认会告知还差哪几方），
+    // 不再用「已 + 状态标签」拼接——环节名拼出来是病句（如「已平台确认」）
+    message.success(结果.hint || `已流转至「${结果.statusLabel}」`);
     动作条.value?.关闭弹窗();
     await 加载();
   } catch {
@@ -196,6 +199,19 @@ onMounted(加载);
           class="mt-4 border-t border-gray-200 pt-3 dark:border-gray-700"
           :status="单据.status"
           :suspended-from="单据.suspendedFrom"
+        />
+
+        <!-- 并行确认进度：三方确认 / 设计评审不分先后，这里展示还差谁 -->
+        <TicketConfirmProgress
+          v-if="单据.status === 'CONFIRMING' || 单据.status === 'DSGN_REVIEWING'"
+          class="mt-3"
+          :status="单据.status"
+          :mit-passed="单据.mitPassed"
+          :platform-passed="单据.platformPassed"
+          :superior-passed="单据.superiorPassed"
+          :dsgn-it-passed="单据.dsgnItPassed"
+          :dsgn-platform-passed="单据.dsgnPlatformPassed"
+          :dsgn-user-passed="单据.dsgnUserPassed"
         />
 
         <div class="mt-4 border-t border-gray-200 pt-3 dark:border-gray-700">

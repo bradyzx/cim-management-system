@@ -151,6 +151,26 @@ public class TicketDetailVO {
     /** 运行监控结论 */
     private String monitorNote;
 
+    // ---- v0.7 并行化：确认与评审进度，前端据此画三方进度标 ----
+
+    /** MIT 已确认：1 是 */
+    private Integer mitPassed;
+
+    /** 平台已确认：1 是 */
+    private Integer platformPassed;
+
+    /** 上级已确认：1 是 */
+    private Integer superiorPassed;
+
+    /** 设计评审 IT 方已通过：1 是 */
+    private Integer dsgnItPassed;
+
+    /** 设计评审平台方已通过：1 是 */
+    private Integer dsgnPlatformPassed;
+
+    /** 设计评审用户方已通过：1 是 */
+    private Integer dsgnUserPassed;
+
     /** 评价结论：PASS / FAIL */
     private String evalResult;
 
@@ -542,6 +562,54 @@ public class TicketDetailVO {
 
     public void setMonitorNote(String monitorNote) {
         this.monitorNote = monitorNote;
+    }
+
+    public Integer getMitPassed() {
+        return mitPassed;
+    }
+
+    public void setMitPassed(Integer mitPassed) {
+        this.mitPassed = mitPassed;
+    }
+
+    public Integer getPlatformPassed() {
+        return platformPassed;
+    }
+
+    public void setPlatformPassed(Integer platformPassed) {
+        this.platformPassed = platformPassed;
+    }
+
+    public Integer getSuperiorPassed() {
+        return superiorPassed;
+    }
+
+    public void setSuperiorPassed(Integer superiorPassed) {
+        this.superiorPassed = superiorPassed;
+    }
+
+    public Integer getDsgnItPassed() {
+        return dsgnItPassed;
+    }
+
+    public void setDsgnItPassed(Integer dsgnItPassed) {
+        this.dsgnItPassed = dsgnItPassed;
+    }
+
+    public Integer getDsgnPlatformPassed() {
+        return dsgnPlatformPassed;
+    }
+
+    public void setDsgnPlatformPassed(Integer dsgnPlatformPassed) {
+        this.dsgnPlatformPassed = dsgnPlatformPassed;
+    }
+
+    public Integer getDsgnUserPassed() {
+        return dsgnUserPassed;
+    }
+
+    public void setDsgnUserPassed(Integer dsgnUserPassed) {
+        this.dsgnUserPassed = dsgnUserPassed;
     }
 
     public String getEvalResult() {

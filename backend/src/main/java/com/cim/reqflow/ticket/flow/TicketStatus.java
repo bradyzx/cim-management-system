@@ -4,16 +4,18 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 单据状态码常量（27 态，与 02 第四节、字典 ticket_status 一一对应）。
+ * 单据状态码常量（23 态，与 02 第四节、字典 ticket_status 一一对应）。
  * <p>
  * 用常量而不是散落各处的字符串字面量：状态码拼错时，写常量会编译不过，
  * 写字符串只会在运行时变成一个查不到翻译的英文码，报错点离出错点很远。
  * <p>
- * 三个旧码（ANALYZED / LEADER_CONFIRM / DESIGN_REVIEW）不在此列：
- * 它们只存在于字典里用于翻译历史数据，新代码不允许产生。
+ * v0.7 并行化：三方确认三态合并为 {@link #CONFIRMING}，设计评审三态合并为
+ * {@link #DSGN_REVIEWING}，各自靠 req_ticket 上的通过标志区分进度。
+ * 六个旧码（CONF_MIT / CONF_PLATFORM / CONF_SUPERIOR / DSGN_REVIEW_*）
+ * 不在此列：只存在于字典里用于翻译历史数据与新代码不允许产生，同早期三个旧码。
  *
  * @author Haijie Xiao
- * @date 2026-11-04
+ * @date 2026-11-05
  */
 public final class TicketStatus {
 
@@ -30,12 +32,8 @@ public final class TicketStatus {
     public static final String AI_CLARIFYING = "AI_CLARIFYING";
     /** 需求文档待确认 */
     public static final String REQ_DOC_DRAFTED = "REQ_DOC_DRAFTED";
-    /** MIT 确认 */
-    public static final String CONF_MIT = "CONF_MIT";
-    /** 平台确认 */
-    public static final String CONF_PLATFORM = "CONF_PLATFORM";
-    /** 上级确认 */
-    public static final String CONF_SUPERIOR = "CONF_SUPERIOR";
+    /** 三方确认中：MIT / 平台 / 上级不分先后，各自通过后置位，全部通过进需求评审 */
+    public static final String CONFIRMING = "CONFIRMING";
     /** 需求评审 */
     public static final String REQ_REVIEW = "REQ_REVIEW";
     /** 待分配 */
@@ -44,12 +42,8 @@ public final class TicketStatus {
     public static final String ASSIGNED = "ASSIGNED";
     /** 设计中 */
     public static final String DESIGNING = "DESIGNING";
-    /** 设计 · IT 评审 */
-    public static final String DSGN_REVIEW_IT = "DSGN_REVIEW_IT";
-    /** 设计 · 平台评审 */
-    public static final String DSGN_REVIEW_PLATFORM = "DSGN_REVIEW_PLATFORM";
-    /** 设计 · 用户评审 */
-    public static final String DSGN_REVIEW_USER = "DSGN_REVIEW_USER";
+    /** 设计评审中：IT / 平台 / 用户不分先后，全部通过进开发并锁定验收标准 */
+    public static final String DSGN_REVIEWING = "DSGN_REVIEWING";
     /** 开发中 */
     public static final String DEVELOPING = "DEVELOPING";
     /** 开发自测 */
@@ -75,14 +69,21 @@ public final class TicketStatus {
     /** 挂起 · 待评审 */
     public static final String SUSPENDED_REVIEW = "SUSPENDED_REVIEW";
 
+    /** v0.7 并行化前的旧码：三方确认，只在字典里翻译历史数据 */
+    public static final Set<String> LEGACY_CONFIRM = Set.of(
+            "CONF_MIT", "CONF_PLATFORM", "CONF_SUPERIOR");
+    /** v0.7 并行化前的旧码：设计评审，只在字典里翻译历史数据 */
+    public static final Set<String> LEGACY_DSGN_REVIEW = Set.of(
+            "DSGN_REVIEW_IT", "DSGN_REVIEW_PLATFORM", "DSGN_REVIEW_USER");
+
     /**
-     * 可被挂起的中间态：1~24，不含 CLOSED。
+     * 可被挂起的中间态：1~20，不含 CLOSED。
      * 挂起是全局动作，任意在途单据都能挂；终态不能挂，挂了就无法恢复。
      */
     public static final List<String> SUSPENDABLE = List.of(
             DRAFT, SUBMITTED, AI_ANALYZING, AI_CLARIFYING, REQ_DOC_DRAFTED,
-            CONF_MIT, CONF_PLATFORM, CONF_SUPERIOR, REQ_REVIEW, PENDING_ASSIGN,
-            ASSIGNED, DESIGNING, DSGN_REVIEW_IT, DSGN_REVIEW_PLATFORM, DSGN_REVIEW_USER,
+            CONFIRMING, REQ_REVIEW, PENDING_ASSIGN,
+            ASSIGNED, DESIGNING, DSGN_REVIEWING,
             DEVELOPING, SELF_TEST, DEPLOYING, UAT, RELEASE_PENDING,
             RELEASED, MONITORING, IT_INSPECTION, EVALUATING);
 

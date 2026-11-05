@@ -247,7 +247,7 @@ public class AttachmentService {
      * <p>
      * 规则按到达状态配置，所以查询的目标不是「当前状态」而是「出边的目标状态」：
      * 停在 DESIGNING 时用户关心的是「提交设计评审要交 FDS」，
-     * 而 DSGN_REVIEW_IT 正是 SUBMIT_DESIGN 的到达状态。
+     * 而 DSGN_REVIEWING 正是 SUBMIT_DESIGN 的到达状态。
      * 一个状态有多条出边时（如 UAT 可去 RELEASE_PENDING 或退回 DEVELOPING），
      * 按 targetStatus 分组返回，前端分组展示。
      * <p>

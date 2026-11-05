@@ -317,6 +317,7 @@ public class PreconditionChecker {
 
     /**
      * 检查退回次数上限。不同退回点维度不同，见 02 6.4。
+     * v0.7 并行化后设计评审退回合并为单点，GROUP 维度不再使用。
      *
      * @param ticket     单据
      * @param action     动作
@@ -333,9 +334,6 @@ public class PreconditionChecker {
 
         if (scope == CountScope.PERSON) {
             return checkPersonLimit(ticket, point, operatorId);
-        }
-        if (scope == CountScope.GROUP) {
-            return checkGroupLimit(ticket);
         }
         return checkTicketLimit(ticket, point);
     }
@@ -355,22 +353,6 @@ public class PreconditionChecker {
             return List.of(new Blocker(Blocker.RETURN_LIMIT,
                     "该退回点已退 " + byTicket + " 次，请与 Leader 沟通后再处理",
                     Map.of("used", byTicket, "max", 3)));
-        }
-        return List.of();
-    }
-
-    /**
-     * 设计评审三步合计上限：单点 2 次、三步合计 3 次。缺了合计这一条就能六轮打转。
-     *
-     * @param ticket 单据
-     * @return 阻塞项
-     */
-    private List<Blocker> checkGroupLimit(ReqTicketDO ticket) {
-        int groupTotal = returnCounter.countInGroup(ticket.getId(), ReturnPoint.DSGN_GROUP);
-        if (groupTotal >= 3) {
-            return List.of(new Blocker(Blocker.RETURN_LIMIT,
-                    "设计评审三个环节合计已退 " + groupTotal + " 次，第 3 次应转挂起评审",
-                    Map.of("used", groupTotal, "max", 3)));
         }
         return List.of();
     }

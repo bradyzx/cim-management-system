@@ -193,6 +193,26 @@ public class ReqTicketDO {
     /** 是否跳过平台确认：1 是 */
     private Integer platformSkipped;
 
+    // ---- v0.7 并行化：确认与评审通过标志，一方置 1 后不许再点 ----
+
+    /** MIT 已确认：1 是 */
+    private Integer mitPassed;
+
+    /** 平台已确认：1 是 */
+    private Integer platformPassed;
+
+    /** 上级已确认：1 是 */
+    private Integer superiorPassed;
+
+    /** 设计评审 IT 方已通过：1 是 */
+    private Integer dsgnItPassed;
+
+    /** 设计评审平台方已通过：1 是 */
+    private Integer dsgnPlatformPassed;
+
+    /** 设计评审用户方已通过：1 是 */
+    private Integer dsgnUserPassed;
+
     /** 需求文档确认时间 */
     private String docConfirmedAt;
 
@@ -688,6 +708,54 @@ public class ReqTicketDO {
 
     public void setPlatformSkipped(Integer platformSkipped) {
         this.platformSkipped = platformSkipped;
+    }
+
+    public Integer getMitPassed() {
+        return mitPassed;
+    }
+
+    public void setMitPassed(Integer mitPassed) {
+        this.mitPassed = mitPassed;
+    }
+
+    public Integer getPlatformPassed() {
+        return platformPassed;
+    }
+
+    public void setPlatformPassed(Integer platformPassed) {
+        this.platformPassed = platformPassed;
+    }
+
+    public Integer getSuperiorPassed() {
+        return superiorPassed;
+    }
+
+    public void setSuperiorPassed(Integer superiorPassed) {
+        this.superiorPassed = superiorPassed;
+    }
+
+    public Integer getDsgnItPassed() {
+        return dsgnItPassed;
+    }
+
+    public void setDsgnItPassed(Integer dsgnItPassed) {
+        this.dsgnItPassed = dsgnItPassed;
+    }
+
+    public Integer getDsgnPlatformPassed() {
+        return dsgnPlatformPassed;
+    }
+
+    public void setDsgnPlatformPassed(Integer dsgnPlatformPassed) {
+        this.dsgnPlatformPassed = dsgnPlatformPassed;
+    }
+
+    public Integer getDsgnUserPassed() {
+        return dsgnUserPassed;
+    }
+
+    public void setDsgnUserPassed(Integer dsgnUserPassed) {
+        this.dsgnUserPassed = dsgnUserPassed;
     }
 
     public String getDocConfirmedAt() {

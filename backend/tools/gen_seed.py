@@ -96,6 +96,9 @@ DB目录 = Path(__file__).resolve().parent.parent / "src" / "main" / "resources"
                    "eval_comment", "evaluated_at", "evaluated_by",
                    # v1.6 新增：项目归属 / 流程标记 / 上线后验证
                    "project_id", "system_id", "mit_skipped", "platform_skipped",
+                   # v0.7 并行化新增：三方确认与设计评审的各方通过标志
+                   "mit_passed", "platform_passed", "superior_passed",
+                   "dsgn_it_passed", "dsgn_platform_passed", "dsgn_user_passed",
                    "doc_confirmed_at", "run_stable_days", "ai_degraded", "ai_clarify_round",
                    "monitor_note", "related_inc_id", "uat_waiver", "uat_waiver_reason",
                    "created_at", "updated_at", "updated_by"],
@@ -539,10 +542,10 @@ for 角色键, 菜单键列表 in 角色菜单.items():
 
 字典类型 = [
     ("ticket_type", "单据类型", "需求 / 缺陷 / 故障"),
-    ("ticket_status", "单据状态", "27 态状态机，与 02 第四节一一对应；3 个旧码置 DISABLED 保留"),
+    ("ticket_status", "单据状态", "23 态状态机（v0.7 并行化），与 02 第四节一一对应；9 个旧码置 DISABLED 保留"),
     ("ticket_priority", "优先级", "P0 最高"),
     ("return_reason", "退回原因", "退回时必须选，不允许只写「不行」"),
-    ("return_point", "退回点", "17 个退回点，同一退回点第 3 次升级，按它聚合计次"),
+    ("return_point", "退回点", "19 个退回点（v0.7 并行化合并后），同一退回点第 3 次升级，按它聚合计次"),
     ("attach_type", "附件类型", "100 个业务槽位：33 已用 + 67 预留，另有 OTHER 兜底"),
     ("cim_system", "所属系统（已作废）", "v1.6 起系统迁入 req_system 实体表，本字典仅用于翻译历史单据"),
     ("employment_type", "用工形式", "实习生的动作限制由 employment_type 判定"),
@@ -584,16 +587,12 @@ for 编码, 名称, 备注 in 字典类型:
         ("AI_ANALYZING", "AI 分析中", "processing"),
         ("AI_CLARIFYING", "待补充澄清", "warning"),
         ("REQ_DOC_DRAFTED", "需求文档待确认", "warning"),
-        ("CONF_MIT", "MIT 确认", "warning"),
-        ("CONF_PLATFORM", "平台确认", "warning"),
-        ("CONF_SUPERIOR", "上级确认", "warning"),
+        ("CONFIRMING", "三方确认中", "warning"),
         ("REQ_REVIEW", "需求评审", "warning"),
         ("PENDING_ASSIGN", "待分配", "warning"),
         ("ASSIGNED", "待接收", "warning"),
         ("DESIGNING", "设计中", "processing"),
-        ("DSGN_REVIEW_IT", "设计·IT 评审", "warning"),
-        ("DSGN_REVIEW_PLATFORM", "设计·平台评审", "warning"),
-        ("DSGN_REVIEW_USER", "设计·用户评审", "warning"),
+        ("DSGN_REVIEWING", "设计评审中", "warning"),
         ("DEVELOPING", "开发中", "processing"),
         ("SELF_TEST", "开发自测", "processing"),
         ("DEPLOYING", "部署中", "processing"),
@@ -610,6 +609,14 @@ for 编码, 名称, 备注 in 字典类型:
         ("ANALYZED", "分析完成（旧）", "success", "DISABLED"),
         ("LEADER_CONFIRM", "上级确认（旧）", "warning", "DISABLED"),
         ("DESIGN_REVIEW", "待确认设计（旧）", "warning", "DISABLED"),
+        # v0.7 并行化退役的 6 个码：三方确认三态、设计评审三态合并为 CONFIRMING / DSGN_REVIEWING，
+        # 同样只翻译历史数据，新代码不产生
+        ("CONF_MIT", "MIT 确认（旧）", "warning", "DISABLED"),
+        ("CONF_PLATFORM", "平台确认（旧）", "warning", "DISABLED"),
+        ("CONF_SUPERIOR", "上级确认（旧）", "warning", "DISABLED"),
+        ("DSGN_REVIEW_IT", "设计·IT 评审（旧）", "warning", "DISABLED"),
+        ("DSGN_REVIEW_PLATFORM", "设计·平台评审（旧）", "warning", "DISABLED"),
+        ("DSGN_REVIEW_USER", "设计·用户评审（旧）", "warning", "DISABLED"),
     ],
     "ticket_priority": [
         ("P0", "P0 紧急", "error"), ("P1", "P1 高", "warning"),
@@ -626,24 +633,28 @@ for 编码, 名称, 备注 in 字典类型:
         ("OTHER", "其他", None),
     ],
     "return_point": [
-        # 编号与 02 第六节 6.2 一一对应；④ 是设计评审退回的统计总称，不单独产生数据
+        # 编号与 02 第六节 6.2 一一对应；④ 是设计评审退回的统计总称，不单独产生数据。
+        # v0.7 并行化：⑦⑩⑪ 合并为 ⑱（三方确认驳回），⑫⑬⑭ 合并为 ⑲（设计评审退回），
+        # 六个旧码置 DISABLED 只翻译历史记录
         ("RT_DOC_REGEN", "① 需求文档退回重生成", None),
         ("RT_ASSIGN_REJECT", "② 待分配退回 / 不予立项", None),
         ("RT_ASSIGN_REFUSE", "③ 待接收拒接", None),
         ("RT_DESIGN_TOTAL", "④ 设计评审退回（统计总称）", None),
         ("RT_UAT_FAIL", "⑤ UAT 退回", None),
         ("RT_RELEASE_REJECT", "⑥ 上线审批驳回", None),
-        ("RT_CONF_SUPERIOR", "⑦ 上级确认驳回", None),
+        ("RT_CONF_SUPERIOR", "⑦ 上级确认驳回", None, "DISABLED"),
         ("RT_REQ_REVIEW", "⑧ 需求评审驳回", None),
         ("RT_EVAL_FAIL", "⑨ 上线评价不符合", None),
-        ("RT_CONF_MIT", "⑩ MIT 确认驳回", None),
-        ("RT_CONF_PLATFORM", "⑪ 平台确认驳回", None),
-        ("RT_DSGN_IT", "⑫ 设计·IT 评审退回", None),
-        ("RT_DSGN_PLATFORM", "⑬ 设计·平台评审退回", None),
-        ("RT_DSGN_USER", "⑭ 设计·用户评审退回", None),
+        ("RT_CONF_MIT", "⑩ MIT 确认驳回", None, "DISABLED"),
+        ("RT_CONF_PLATFORM", "⑪ 平台确认驳回", None, "DISABLED"),
+        ("RT_DSGN_IT", "⑫ 设计·IT 评审退回", None, "DISABLED"),
+        ("RT_DSGN_PLATFORM", "⑬ 设计·平台评审退回", None, "DISABLED"),
+        ("RT_DSGN_USER", "⑭ 设计·用户评审退回", None, "DISABLED"),
         ("RT_PROD_ACCEPT", "⑮ 上线验收不通过", None),
         ("RT_MONITOR", "⑯ 运行监控异常退回", None),
         ("RT_IT_CHECK", "⑰ IT 点检不通过", None),
+        ("RT_CONFS", "⑱ 三方确认驳回", None),
+        ("RT_DSGN_REVIEW", "⑲ 设计评审退回", None),
     ],
     # 一物一码：33 个已用 + 67 个预留 + OTHER 兜底。预留行 status=DISABLED，前端下拉不显示；
     # 启用方式是把 dict_value 改成语义码、改中文名、status 置 ACTIVE，行 id 不变（07 2.4）。
@@ -816,16 +827,14 @@ SLA配置 = [
     ("REQ", "*", "AI_ANALYZING", 0.1, 0.05, "NOTIFY", "5 分钟未完成视为 AI 失败，降级模板空壳"),
     ("REQ", "*", "AI_CLARIFYING", 16, 8, "NOTIFY", "2 个工作日未答复；满 3 轮自动带未澄清项出文档"),
     ("REQ", "*", "REQ_DOC_DRAFTED", 16, 8, "NOTIFY", "2 个工作日未确认，第 5 天自动关闭（可重开）"),
-    ("REQ", "*", "CONF_MIT", 8, 4, "NOTIFY", "1 个工作日未确认，第 2 天升级其主管；跳过不计时"),
-    ("REQ", "*", "CONF_PLATFORM", 8, 4, "NOTIFY", "1 个工作日未确认，第 2 天升级其主管；跳过不计时"),
-    ("REQ", "*", "CONF_SUPERIOR", 8, 4, "NOTIFY", "1 个工作日未确认，第 2 天升级其上级；跳过不计时"),
+    # v0.7 并行化：三方确认合并计时，任一方未确认都算这 1 个工作日；跳过不计时
+    ("REQ", "*", "CONFIRMING", 8, 4, "NOTIFY", "1 个工作日内三方中任一方未确认，第 2 天升级其主管；跳过不计时"),
     ("REQ", "*", "REQ_REVIEW", 16, 8, "NOTIFY", "2 个工作日未评审，超 3 天通知 ADMIN 协调"),
     ("REQ", "*", "PENDING_ASSIGN", 8, 4, "ESCALATE", "1 个工作日未派单，2 天升级主管"),
     ("REQ", "*", "ASSIGNED", 4, 2, "NOTIFY", "4 小时未接收，1 天自动回池"),
     ("REQ", "*", "DESIGNING", 24, 8, "NOTIFY", "3 个工作日未提交设计"),
-    ("REQ", "*", "DSGN_REVIEW_IT", 8, 4, "NOTIFY", "1 个工作日未评审，2 天升级 MIT Leader"),
-    ("REQ", "*", "DSGN_REVIEW_PLATFORM", 8, 4, "NOTIFY", "1 个工作日未评审，2 天升级其主管"),
-    ("REQ", "*", "DSGN_REVIEW_USER", 16, 8, "NOTIFY", "2 个工作日未确认，自动催办"),
+    # v0.7 并行化：设计评审三步并行，取原三步中最宽的用户评审时限（2 个工作日）
+    ("REQ", "*", "DSGN_REVIEWING", 16, 8, "NOTIFY", "2 个工作日内三方中任一方未评审，自动催办"),
     ("REQ", "*", "DEVELOPING", 0, 0, "ESCALATE", "按派单预估工时，超 20% 预警、50% 升级"),
     ("REQ", "*", "SELF_TEST", 8, 4, "NOTIFY", "1 个工作日未提交自测"),
     ("REQ", "*", "DEPLOYING", 1, 0.5, "NOTIFY", "构建耗时 + 10 分钟，二期启用"),
@@ -1008,14 +1017,14 @@ for 系统, 环境, 类型, 目标, 参数 in 部署示例:
 # =====================================================================
 
 # 键是「流转到达的状态」to_status，不是「现在停在哪」from_status。
-# 例：FDS 要在提交设计（离开 DESIGNING）时校验，所以规则挂在 DSGN_REVIEW_IT 上；
+# 例：FDS 要在提交设计（离开 DESIGNING）时校验，所以规则挂在 DSGN_REVIEWING 上；
 # 挂在 DESIGNING 上等于「刚进设计就要有设计文档」，永远拦死。这条 09 第四节第 3 条定过，
 # DDL v1.5 把语义写进了 req_attach_rule.status 的注释。
 # 元组：单据类型 / 到达状态 / 附件类型 / 最少份数 / 是否必填 / 备注
 附件规则 = [
-    ("REQ", "CONF_MIT", "REQ_DOC", 1, 1, "N06 确认需求文档：没文档不许进三方确认"),
+    ("REQ", "CONFIRMING", "REQ_DOC", 1, 1, "N06 确认需求文档：没文档不许进三方确认"),
     ("REQ", "PENDING_ASSIGN", "REVIEW_DOC", 1, 1, "N10 需求评审：评审纪要是立项依据"),
-    ("REQ", "DSGN_REVIEW_IT", "FDS", 1, 1, "N13 提交设计：没有 FDS 不许进设计评审"),
+    ("REQ", "DSGN_REVIEWING", "FDS", 1, 1, "N13 提交设计：没有 FDS 不许进设计评审"),
     ("REQ", "UAT", "TEST_REPORT", 1, 1, "N18 自测通过：没有用例与自测报告，「自测通过」没有依据"),
     ("REQ", "RELEASED", "RELEASE_DOC", 1, 1, "N21 上线审批：上线申请单与回滚方案缺一不批"),
     ("REQ", "RELEASED", "ROLLBACK_PLAN", 1, 1, "同上，两份都要传"),
@@ -1165,6 +1174,13 @@ def 建演示单(单号, 标题, 状态, 系统码, **额外字段):
         superior_skipped=0,
         mit_skipped=额外字段.pop("mit_skipped", 0),
         platform_skipped=额外字段.pop("platform_skipped", 0),
+        # v0.7 并行化：各方通过标志，演示单按所处环节传入
+        mit_passed=额外字段.pop("mit_passed", 0),
+        platform_passed=额外字段.pop("platform_passed", 0),
+        superior_passed=额外字段.pop("superior_passed", 0),
+        dsgn_it_passed=额外字段.pop("dsgn_it_passed", 0),
+        dsgn_platform_passed=额外字段.pop("dsgn_platform_passed", 0),
+        dsgn_user_passed=额外字段.pop("dsgn_user_passed", 0),
         run_stable_days=额外字段.pop("run_stable_days", 7),
         ai_degraded=额外字段.pop("ai_degraded", 0),
         ai_clarify_round=额外字段.pop("ai_clarify_round", 0),
@@ -1335,9 +1351,10 @@ def 建验收条(单, 序号, 内容, 已锁定):
 建流转(单3, "PENDING_ASSIGN", "ASSIGNED", "ASSIGN", 组长, "2026-10-27 10:00:00",
        remark="指派给李四，预估 8 小时")
 
-# --- 单 4：设计三步走到用户评审，等提出人确认 ---
+# --- 单 4：设计评审 IT / 平台已过（并行置位），等用户评审 ---
 单4 = 建演示单(
-    "REQ-2026-000004", "QMS 来料检验单增加供应商批次关联", "DSGN_REVIEW_USER", "QMS",
+    "REQ-2026-000004", "QMS 来料检验单增加供应商批次关联", "DSGN_REVIEWING", "QMS",
+    dsgn_it_passed=1, dsgn_platform_passed=1,
     description="来料检验单希望直接关联供应商批次号，替代手工备注。",
     content_asis="检验单的供应商批次填在备注栏，格式五花八门没法统计。",
     content_tobe="检验单增加供应商批次字段，从来料批次表选择，必填校验。",
@@ -1442,7 +1459,7 @@ def 建验收条(单, 序号, 内容, 已锁定):
     review_passed_at="2026-10-19 10:00:00",
     assignee_id=开发, assigned_at="2026-10-19 14:00:00",
     design_at="2026-10-23 17:00:00",
-    return_count=3, suspended_from="DSGN_REVIEW_USER",
+    return_count=3, suspended_from="DSGN_REVIEWING",
     suspend_reason="设计稿两次修改仍不符合业务预期，⑭ 退回点第 3 次，按规则升级挂起待评审",
     sla_due_at="2026-11-07 10:00:00",
 )

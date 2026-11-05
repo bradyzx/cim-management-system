@@ -166,6 +166,12 @@ public class TicketDetailService {
         vo.setSuspendReason(ticket.getSuspendReason());
         vo.setExpectResumeAt(ticket.getExpectResumeAt());
         vo.setMonitorNote(ticket.getMonitorNote());
+        vo.setMitPassed(ticket.getMitPassed());
+        vo.setPlatformPassed(ticket.getPlatformPassed());
+        vo.setSuperiorPassed(ticket.getSuperiorPassed());
+        vo.setDsgnItPassed(ticket.getDsgnItPassed());
+        vo.setDsgnPlatformPassed(ticket.getDsgnPlatformPassed());
+        vo.setDsgnUserPassed(ticket.getDsgnUserPassed());
         vo.setEvalResult(ticket.getEvalResult());
         vo.setSatisfactionScore(ticket.getSatisfactionScore());
         vo.setEvalComment(ticket.getEvalComment());

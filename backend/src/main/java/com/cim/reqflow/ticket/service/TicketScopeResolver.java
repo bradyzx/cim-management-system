@@ -11,6 +11,8 @@ import com.cim.reqflow.system.mapper.SysDeptMapper;
 import com.cim.reqflow.system.mapper.SysUserDeptMapper;
 import com.cim.reqflow.system.service.UserAccessService;
 import com.cim.reqflow.ticket.entity.ReqTicketDO;
+import com.cim.reqflow.ticket.flow.FlowAction;
+import com.cim.reqflow.ticket.flow.OwnerRule;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -39,6 +41,9 @@ import java.util.function.Consumer;
  *   <li>{@code DEPT_AND_SUB}：本部门及下级的单</li>
  *   <li>{@code GROUP}：我作为负责人的部门（含下级）+ 全部待分配单</li>
  * </ul>
+ * 在五类范围之外还有一条补丁：「当前状态轮到我处理」的单据无条件可见
+ * （见 {@link #resolveActionStatuses}）——否则确认人、评审人在列表里
+ * 找不到停在自家环节的单，流程走不下去。
  *
  * @author Haijie Xiao
  * @date 2026-11-04
@@ -108,6 +113,15 @@ public class TicketScopeResolver {
             if (condition != null) {
                 conditions.add(condition);
             }
+        }
+
+        // 「轮到我处理」的单据无条件并入可见范围：五类范围全按部门/归属过滤，
+        // 而确认人、评审人、上线审批人这类角色，单据既不是他提的也不是他承办的，
+        // 部门也对不上——单停在他们的环节，列表却看不见，流程在这里断头。
+        // 从动作表反查我的角色在哪些状态有可执行动作，与 /actions 鉴权同一套数据。
+        Set<String> actionStatuses = resolveActionStatuses(userId);
+        if (!actionStatuses.isEmpty()) {
+            conditions.add(outer -> outer.in(ReqTicketDO::getStatus, actionStatuses));
         }
 
         if (conditions.isEmpty()) {
@@ -223,7 +237,56 @@ public class TicketScopeResolver {
     }
 
     /**
-     * 取用户主部门。
+     * 求「当前状态轮到我处理」的状态集合。
+     * <p>
+     * 从 {@link FlowAction} 反查：某状态存在一个「我角色可执行、且归属按角色/团队判定」
+     * 的动作，停在该状态的单据就对我可见。数据与 {@code TicketFlowService} 的鉴权同源，
+     * 只是放宽到「找得到单」；确认人类动作执行时仍按确认人现算做精确校验，
+     * 不会因为这里放宽就放掉越权操作。
+     * <p>
+     * 三条排除，防止可见范围被撑爆或与既有范围重复：
+     * <ul>
+     *   <li>系统动作（roles 空集）不含登录态可执行的动作，跳过；</li>
+     *   <li>fromStatus 为 * 的全局动作（挂起等）跳过——Leader 本就能对可见单挂起，
+     *       按它扩范围会让 Leader 看到全公司的单，数据范围形同虚设；</li>
+     *   <li>REPORTER / ASSIGNEE 归属的动作不参与：那类单据已由 SELF / ASSIGNED
+     *       范围覆盖，按角色放开会变成「所有提出人都能看到别人的待确认文档」。</li>
+     * </ul>
+     * 状态码取自需求（REQ）状态机；BUG / INC 的状态码与之不相交，
+     * 对那两类列表这个条件天然不命中，无需按单据类型分支。
+     *
+     * @param userId 当前用户
+     * @return 待我处理的状态码集合，可能为空
+     */
+    private Set<String> resolveActionStatuses(String userId) {
+        List<String> roleCodes = userAccessService.listRoleCodes(userId);
+        if (roleCodes.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> statuses = new HashSet<>();
+        for (FlowAction action : FlowAction.values()) {
+            if (action.isSystemOnly()) {
+                continue;
+            }
+            OwnerRule ownerRule = action.getOwnerRule();
+            if (ownerRule != OwnerRule.CONFIRMER && ownerRule != OwnerRule.LEADER) {
+                continue;
+            }
+            if ("*".equals(action.getFromStatus())) {
+                continue;
+            }
+            for (String role : action.getRoles()) {
+                if (roleCodes.contains(role)) {
+                    statuses.add(action.getFromStatus());
+                    break;
+                }
+            }
+        }
+        return statuses;
+    }
+
+    /**
+     * 求用户主部门。
      *
      * @param userId 用户
      * @return 部门 ID，没有主部门时返回 null

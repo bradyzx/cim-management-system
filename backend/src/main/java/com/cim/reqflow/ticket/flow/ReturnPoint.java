@@ -1,19 +1,15 @@
 package com.cim.reqflow.ticket.flow;
 
-import java.util.List;
-
 /**
- * 退回点码（17 个，与 02 第六节、字典 return_point 一一对应）。
+ * 退回点码（19 个，与 02 第六节、字典 return_point 一一对应）。
  * <p>
- * 编号 ①~⑨ 是早期就有的，⑩~⑮ 随三方确认与设计评审拆分追加，⑯⑰ 补的是两条原本没有编号的
- * 回退边（监控异常、点检不通过）。**只增不改、不重排**：已有编号被历史报表、SLA 配置、
- * 前端文案引用，插在中间会让后面全部顺延，改一处漏一处。
+ * 编号 ①~⑰ 沿用历史；⑱⑲ 是 v0.7 并行化新增的合并点：三方确认 ⑦⑩⑪ 合并为 ⑱，
+ * 设计评审 ⑫⑬⑭ 合并为 ⑲。旧六个码保留在字典里翻译历史数据，新代码不再产生。
  * <p>
- * ④ 保留为「设计评审退回」的统计总称，不单独产生数据 —— 细分落在 ⑫⑬⑭ 三个点上，
- * 这样历史报表里 ④ 的数字不会突然变成 0。
+ * ④ 保留为「设计评审退回」的统计总称，不单独产生数据。
  *
  * @author Haijie Xiao
- * @date 2026-11-04
+ * @date 2026-11-05
  */
 public final class ReturnPoint {
 
@@ -54,11 +50,15 @@ public final class ReturnPoint {
     public static final String MONITOR = "RT_MONITOR";
     /** ⑰ IT 点检不通过 */
     public static final String IT_CHECK = "RT_IT_CHECK";
-
     /**
-     * 设计评审三步的合计计数组。
-     * ⑫⑬⑭ 各自单点 2 次，但同一张单在这三个点上的退回次数合计到 3 次也要升级 ——
-     * 否则可以在 IT 退 2 次、平台退 2 次、用户退 2 次，六轮打转。
+     * ⑱ 三方确认驳回（v0.7 并行化新增）。
+     * 原 ⑦⑩⑪ 三个点合并：确认不分先后，驳回也不分是谁驳的，
+     * 统一计次到同一个点，同单累计第 3 次转挂起评审。
      */
-    public static final List<String> DSGN_GROUP = List.of(DSGN_IT, DSGN_PLATFORM, DSGN_USER);
+    public static final String CONFS = "RT_CONFS";
+    /**
+     * ⑲ 设计评审退回（v0.7 并行化新增）。
+     * 原 ⑫⑬⑭ 三个点合并，语义同 ⑱：设计评审三步并行后按一个点计次。
+     */
+    public static final String DSGN_REVIEW = "RT_DSGN_REVIEW";
 }

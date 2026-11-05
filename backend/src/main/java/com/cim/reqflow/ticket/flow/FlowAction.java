@@ -2,7 +2,6 @@ package com.cim.reqflow.ticket.flow;
 
 import java.util.Set;
 
-import static com.cim.reqflow.ticket.flow.CountScope.GROUP;
 import static com.cim.reqflow.ticket.flow.CountScope.NONE;
 import static com.cim.reqflow.ticket.flow.CountScope.PERSON;
 import static com.cim.reqflow.ticket.flow.CountScope.TICKET;
@@ -20,16 +19,12 @@ import static com.cim.reqflow.ticket.flow.TicketStatus.ASSIGNED;
 import static com.cim.reqflow.ticket.flow.TicketStatus.AI_ANALYZING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.AI_CLARIFYING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.CLOSED;
-import static com.cim.reqflow.ticket.flow.TicketStatus.CONF_MIT;
-import static com.cim.reqflow.ticket.flow.TicketStatus.CONF_PLATFORM;
-import static com.cim.reqflow.ticket.flow.TicketStatus.CONF_SUPERIOR;
+import static com.cim.reqflow.ticket.flow.TicketStatus.CONFIRMING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.DEPLOYING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.DESIGNING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.DEVELOPING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.DRAFT;
-import static com.cim.reqflow.ticket.flow.TicketStatus.DSGN_REVIEW_IT;
-import static com.cim.reqflow.ticket.flow.TicketStatus.DSGN_REVIEW_PLATFORM;
-import static com.cim.reqflow.ticket.flow.TicketStatus.DSGN_REVIEW_USER;
+import static com.cim.reqflow.ticket.flow.TicketStatus.DSGN_REVIEWING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.EVALUATING;
 import static com.cim.reqflow.ticket.flow.TicketStatus.IT_INSPECTION;
 import static com.cim.reqflow.ticket.flow.TicketStatus.MONITORING;
@@ -52,7 +47,8 @@ import static com.cim.reqflow.ticket.flow.TicketStatus.UAT;
  * 1. **一个常量 = 一条 from → to 边**。不允许一码两目标：⑥ 上线驳回与 ⑮ 验收不通过
  *    各有两条去处，拆成 _TEST / _DESIGN 两个常量。唯一的多值 from 是跳过确认，
  *    已拆成 SKIP_CONF_MIT / SKIP_CONF_PLATFORM / SKIP_CONF_SUPERIOR 三个常量。
- * 2. **不改状态的写操作也是动作**（INSPECT_PASS 的 to = from，UAT_RAISE_BUG 只生成子单），
+ *    v0.7 并行化的「全部通过才升级」是唯一的条件目标，落在服务层 applyTransition 一处。
+ * 2. **不改状态的写操作也是动作**（点检通过、提 BUG 单、并行确认的单方置位），
  *    统一走 /action 入口、统一写 req_flow_log，否则这部分操作没有留痕，审计断链。
  * 3. **系统动作同样有码**，roles 为空集。跳过确认、AI 出文档、定时器转评价都要留痕，
  *    否则「谁在什么时候把单推走的」查不出来。
@@ -60,7 +56,7 @@ import static com.cim.reqflow.ticket.flow.TicketStatus.UAT;
  * 完整规则与判定矩阵见 12-动作码与权限矩阵.md，本枚举是它的代码投影。
  *
  * @author Haijie Xiao
- * @date 2026-11-04
+ * @date 2026-11-05
  */
 public enum FlowAction {
 
@@ -100,43 +96,52 @@ public enum FlowAction {
             OwnerRule.REPORTER, REPORTERS, ReturnPoint.DOC_REGEN, NONE, "ticket:doc-regenerate"),
 
     /** 确认需求文档：必传 REQ_DOC，没文档不许进三方确认 */
-    DOC_CONFIRM("DOC_CONFIRM", "确认需求文档", REQ_DOC_DRAFTED, CONF_MIT,
+    DOC_CONFIRM("DOC_CONFIRM", "确认需求文档", REQ_DOC_DRAFTED, CONFIRMING,
             OwnerRule.REPORTER, REPORTERS, null, NONE, "ticket:doc-confirm"),
 
     /** 判定重复关闭：AI 建议不拦，人来定 */
     DUP_CLOSE("DUP_CLOSE", "判定重复关闭", REQ_DOC_DRAFTED, CLOSED,
             OwnerRule.REPORTER, REPORTERS, null, NONE, "ticket:close"),
 
-    // ================= B 三方确认（固定串行） =================
+    // ================= B 三方确认（并行，不分先后） =================
+    // v0.7 并行化：三个 PASS 的 toStatus 都写 CONFIRMING，服务层在三个标志
+    // 全部置位后把目标状态升级为 REQ_REVIEW。枚举保持「一码一目标」的字面，
+    // 条件升级只发生在服务层一处（applyTransition）。
 
-    CONF_MIT_PASS("CONF_MIT_PASS", "MIT 确认通过", CONF_MIT, CONF_PLATFORM,
+    /** MIT 确认通过：置 mit_passed=1，三方全过后进需求评审 */
+    CONF_MIT_PASS("CONF_MIT_PASS", "MIT 确认通过", CONFIRMING, CONFIRMING,
             OwnerRule.CONFIRMER, MIT_CONF, null, NONE, "ticket:conf-mit"),
 
-    CONF_MIT_REJECT("CONF_MIT_REJECT", "MIT 驳回", CONF_MIT, DRAFT,
-            OwnerRule.CONFIRMER, MIT_CONF, ReturnPoint.CONF_MIT, TICKET, "ticket:conf-mit"),
+    /** MIT 驳回：单据回 DRAFT，不自动重提也不自动关单 */
+    CONF_MIT_REJECT("CONF_MIT_REJECT", "MIT 驳回", CONFIRMING, DRAFT,
+            OwnerRule.CONFIRMER, MIT_CONF, ReturnPoint.CONFS, TICKET, "ticket:conf-mit"),
 
-    CONF_PLATFORM_PASS("CONF_PLATFORM_PASS", "平台确认通过", CONF_PLATFORM, CONF_SUPERIOR,
+    /** 平台确认通过：置 platform_passed=1 */
+    CONF_PLATFORM_PASS("CONF_PLATFORM_PASS", "平台确认通过", CONFIRMING, CONFIRMING,
             OwnerRule.CONFIRMER, PLATFORM_CONF, null, NONE, "ticket:conf-platform"),
 
-    CONF_PLATFORM_REJECT("CONF_PLATFORM_REJECT", "平台驳回", CONF_PLATFORM, DRAFT,
-            OwnerRule.CONFIRMER, PLATFORM_CONF, ReturnPoint.CONF_PLATFORM, TICKET, "ticket:conf-platform"),
+    /** 平台驳回 */
+    CONF_PLATFORM_REJECT("CONF_PLATFORM_REJECT", "平台驳回", CONFIRMING, DRAFT,
+            OwnerRule.CONFIRMER, PLATFORM_CONF, ReturnPoint.CONFS, TICKET, "ticket:conf-platform"),
 
-    CONF_SUPERIOR_PASS("CONF_SUPERIOR_PASS", "上级确认通过", CONF_SUPERIOR, REQ_REVIEW,
+    /** 上级确认通过：置 superior_passed=1 */
+    CONF_SUPERIOR_PASS("CONF_SUPERIOR_PASS", "上级确认通过", CONFIRMING, CONFIRMING,
             OwnerRule.CONFIRMER, SUPERIOR_CONF, null, NONE, "ticket:leader-confirm"),
 
-    CONF_SUPERIOR_REJECT("CONF_SUPERIOR_REJECT", "上级驳回", CONF_SUPERIOR, DRAFT,
-            OwnerRule.CONFIRMER, SUPERIOR_CONF, ReturnPoint.CONF_SUPERIOR, TICKET, "ticket:leader-confirm"),
+    /** 上级驳回 */
+    CONF_SUPERIOR_REJECT("CONF_SUPERIOR_REJECT", "上级驳回", CONFIRMING, DRAFT,
+            OwnerRule.CONFIRMER, SUPERIOR_CONF, ReturnPoint.CONFS, TICKET, "ticket:leader-confirm"),
 
-    /** 跳过 MIT 确认：提出人本人就是 MIT Leader，只免「人点一下」，不免 SLA 计时口径 */
-    SKIP_CONF_MIT("SKIP_CONF_MIT", "跳过 MIT 确认", CONF_MIT, CONF_PLATFORM,
+    /** 跳过 MIT 确认：提出人本人就是 MIT Leader，直接置 mit_passed=1 */
+    SKIP_CONF_MIT("SKIP_CONF_MIT", "跳过 MIT 确认", CONFIRMING, CONFIRMING,
             OwnerRule.NONE, SYSTEM_ROLES, null, NONE, null),
 
     /** 跳过平台确认 */
-    SKIP_CONF_PLATFORM("SKIP_CONF_PLATFORM", "跳过平台确认", CONF_PLATFORM, CONF_SUPERIOR,
+    SKIP_CONF_PLATFORM("SKIP_CONF_PLATFORM", "跳过平台确认", CONFIRMING, CONFIRMING,
             OwnerRule.NONE, SYSTEM_ROLES, null, NONE, null),
 
     /** 跳过上级确认 */
-    SKIP_CONF_SUPERIOR("SKIP_CONF_SUPERIOR", "跳过上级确认", CONF_SUPERIOR, REQ_REVIEW,
+    SKIP_CONF_SUPERIOR("SKIP_CONF_SUPERIOR", "跳过上级确认", CONFIRMING, CONFIRMING,
             OwnerRule.NONE, SYSTEM_ROLES, null, NONE, null),
 
     // ================= C 评审立项 =================
@@ -171,29 +176,36 @@ public enum FlowAction {
             OwnerRule.ASSIGNEE, DEVS, ReturnPoint.ASSIGN_REFUSE, PERSON, "ticket:refuse"),
 
     /** 提交设计：必传 FDS */
-    SUBMIT_DESIGN("SUBMIT_DESIGN", "提交设计", DESIGNING, DSGN_REVIEW_IT,
+    SUBMIT_DESIGN("SUBMIT_DESIGN", "提交设计", DESIGNING, DSGN_REVIEWING,
             OwnerRule.ASSIGNEE, DEVS, null, NONE, "ticket:design"),
 
-    DSGN_IT_PASS("DSGN_IT_PASS", "IT 评审通过", DSGN_REVIEW_IT, DSGN_REVIEW_PLATFORM,
+    // ---- 设计评审（v0.7 并行化，不分先后；三个 PASS 全部置位后进开发） ----
+
+    /** IT 评审通过：置 dsgn_it_passed=1 */
+    DSGN_IT_PASS("DSGN_IT_PASS", "IT 评审通过", DSGN_REVIEWING, DSGN_REVIEWING,
             OwnerRule.LEADER, IT_ROLES, null, NONE, "ticket:dsgn-review-it"),
 
-    /** IT 评审退回（退回点 ⑫）：三步合计 3 次进评审，不是单点 3 次 */
-    DSGN_IT_RETURN("DSGN_IT_RETURN", "IT 评审退回", DSGN_REVIEW_IT, DESIGNING,
-            OwnerRule.LEADER, IT_ROLES, ReturnPoint.DSGN_IT, GROUP, "ticket:dsgn-review-it"),
+    /** IT 评审退回：单据回设计，退回点合并为 RT_DSGN_REVIEW */
+    DSGN_IT_RETURN("DSGN_IT_RETURN", "IT 评审退回", DSGN_REVIEWING, DESIGNING,
+            OwnerRule.LEADER, IT_ROLES, ReturnPoint.DSGN_REVIEW, TICKET, "ticket:dsgn-review-it"),
 
-    DSGN_PLATFORM_PASS("DSGN_PLATFORM_PASS", "平台评审通过", DSGN_REVIEW_PLATFORM, DSGN_REVIEW_USER,
+    /** 平台评审通过：置 dsgn_platform_passed=1 */
+    DSGN_PLATFORM_PASS("DSGN_PLATFORM_PASS", "平台评审通过", DSGN_REVIEWING, DSGN_REVIEWING,
             OwnerRule.CONFIRMER, PLATFORM_CONF, null, NONE, "ticket:dsgn-review-platform"),
 
-    DSGN_PLATFORM_RETURN("DSGN_PLATFORM_RETURN", "平台评审退回", DSGN_REVIEW_PLATFORM, DESIGNING,
-            OwnerRule.CONFIRMER, PLATFORM_CONF, ReturnPoint.DSGN_PLATFORM, GROUP,
-            "ticket:dsgn-review-platform"),
+    /** 平台评审退回 */
+    DSGN_PLATFORM_RETURN("DSGN_PLATFORM_RETURN", "平台评审退回", DSGN_REVIEWING, DESIGNING,
+            OwnerRule.CONFIRMER, PLATFORM_CONF, ReturnPoint.DSGN_REVIEW,
+            TICKET, "ticket:dsgn-review-platform"),
 
-    /** 用户评审通过：验收标准在这一步锁定 */
-    DSGN_USER_PASS("DSGN_USER_PASS", "用户评审通过", DSGN_REVIEW_USER, DEVELOPING,
+    /** 用户评审通过：置 dsgn_user_passed=1；三方全过进开发，验收标准在全过时锁定 */
+    DSGN_USER_PASS("DSGN_USER_PASS", "用户评审通过", DSGN_REVIEWING, DSGN_REVIEWING,
             OwnerRule.REPORTER, REPORTERS, null, NONE, "ticket:dsgn-review-user"),
 
-    DSGN_USER_RETURN("DSGN_USER_RETURN", "用户评审退回", DSGN_REVIEW_USER, DESIGNING,
-            OwnerRule.REPORTER, REPORTERS, ReturnPoint.DSGN_USER, GROUP, "ticket:dsgn-review-user"),
+    /** 用户评审退回 */
+    DSGN_USER_RETURN("DSGN_USER_RETURN", "用户评审退回", DSGN_REVIEWING, DESIGNING,
+            OwnerRule.REPORTER, REPORTERS, ReturnPoint.DSGN_REVIEW, TICKET,
+            "ticket:dsgn-review-user"),
 
     // ================= F 开发测试 =================
 

@@ -39,6 +39,8 @@ export interface TicketActionResult {
   /** 本次是否触发了「同一退回点第 3 次转评审」 */
   escalated: boolean;
   fromStatus: string;
+  /** 后端生成的提示语（并行确认时告知还差哪几方），空则前端自行兜底 */
+  hint?: null | string;
   returnSeq?: null | number;
   slaDueAt?: null | string;
   statusLabel: string;
@@ -78,6 +80,10 @@ export interface TicketDetail {
   contentTobe?: null | string;
   createdAt?: null | string;
   creatorName?: null | string;
+  // v0.7 并行化：三方确认与设计评审的各方通过标志
+  dsgnItPassed?: null | number;
+  dsgnPlatformPassed?: null | number;
+  dsgnUserPassed?: null | number;
   deptName?: null | string;
   description?: null | string;
   designAt?: null | string;
@@ -89,9 +95,12 @@ export interface TicketDetail {
   expectDueDate?: null | string;
   expectResumeAt?: null | string;
   id: string;
+  mitPassed?: null | number;
   moduleCode?: null | string;
   monitorNote?: null | string;
   ownerName?: null | string;
+  platformPassed?: null | number;
+  superiorPassed?: null | number;
   priority?: null | string;
   priorityCssClass?: null | string;
   priorityLabel?: null | string;
@@ -282,10 +291,18 @@ export async function uploadTicketAttachmentApi(
   const formData = new FormData();
   formData.append('attachType', attachType);
   formData.append('file', file);
-  // 不要手写 Content-Type：让浏览器自己补 boundary，手写会漏掉分隔符导致后端解析失败
+  // RequestClient 实例默认头是 application/json，axios 1.19 浏览器端不会为
+  // FormData 自动覆盖它，请求会带着 JSON 头出去，Spring 就不按 multipart 解析，
+  // attachType / file 全部取不到（报「缺少必填参数：attachType」）。
+  // 必须在请求级显式指回 multipart；boundary 由浏览器补，不能手写。
   return requestClient.post<TicketAttachmentUploadResult>(
     `/ticket/${ticketId}/attachment`,
     formData,
+    {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    },
   );
 }
 

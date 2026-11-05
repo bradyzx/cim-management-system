@@ -77,14 +77,14 @@ let 用户已加载 = false;
 /**
  * 评审结论「继续」可选的目标状态。
  *
- * 一期固定四项：评审组只可能把单子打回需求池、设计、需求评审或 MIT 确认，
+ * 一期固定四项：评审组只可能把单子打回需求池、设计、需求评审或三方确认，
  * 不允许「原地继续」—— 那等于评审没有结论。
  */
 const 评审目标选项: 选项[] = [
   { label: '待分配', value: 'PENDING_ASSIGN' },
   { label: '设计中', value: 'DESIGNING' },
   { label: '需求评审', value: 'REQ_REVIEW' },
-  { label: 'MIT 确认', value: 'CONF_MIT' },
+  { label: '三方确认', value: 'CONFIRMING' },
 ];
 
 /** 动作码到表单字段的映射 */

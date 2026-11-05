@@ -1,6 +1,13 @@
 -- =====================================================================
 -- 需求全生命周期管理系统 · 表结构（SQLite）
--- 版本：v1.6    依据：03-技术方案与约束 v0.12 / 02-流程与退回机制 v0.6 / 04 / 06 / 07 / 08 / 10
+-- 版本：v1.7    依据：03-技术方案与约束 v0.12 / 02-流程与退回机制 v0.6 / 04 / 06 / 07 / 08 / 10
+--
+-- v1.7 变更（v0.7 并行化：三方确认与设计评审不分先后，27 态改 23 态）：
+--   1. req_ticket 补 6 列：mit_passed / platform_passed / superior_passed /
+--      dsgn_it_passed / dsgn_platform_passed / dsgn_user_passed
+--   2. CONF_MIT / CONF_PLATFORM / CONF_SUPERIOR 合并为 CONFIRMING，
+--      DSGN_REVIEW_IT / DSGN_REVIEW_PLATFORM / DSGN_REVIEW_USER 合并为 DSGN_REVIEWING，
+--      旧 6 码只留字典翻译历史；退回点 ⑦⑩⑪ 合并为 ⑱ RT_CONFS、⑫⑬⑭ 合并为 ⑲ RT_DSGN_REVIEW
 --
 -- v1.6 变更（对齐 02 v0.6 的 27 态与 17 个退回点，详见 10 号提案）：
 --   1. 新建 5 表：req_project / req_system（项目—系统两级归属）、req_doc（AI 需求文档 12 节）、
@@ -340,6 +347,13 @@ CREATE TABLE req_ticket (
   system_id             TEXT NOT NULL,                     -- 所属系统（主关联），提单页下拉按当前项目过滤
   mit_skipped           INTEGER NOT NULL DEFAULT 0,        -- 1 = 提出人本人即 MIT Leader，跳过该环节
   platform_skipped      INTEGER NOT NULL DEFAULT 0,        -- 1 = 提出人本人即平台负责人，跳过
+  -- v0.7 并行化：三方确认与设计评审不分先后，各方通过后置 1；全 1 由服务层原子升级状态
+  mit_passed            INTEGER NOT NULL DEFAULT 0,        -- 1 = MIT 已确认（CONFIRMING 阶段）
+  platform_passed       INTEGER NOT NULL DEFAULT 0,        -- 1 = 平台已确认（CONFIRMING 阶段）
+  superior_passed       INTEGER NOT NULL DEFAULT 0,        -- 1 = 上级已确认（CONFIRMING 阶段）
+  dsgn_it_passed        INTEGER NOT NULL DEFAULT 0,        -- 1 = IT 评审已通过（DSGN_REVIEWING 阶段）
+  dsgn_platform_passed  INTEGER NOT NULL DEFAULT 0,        -- 1 = 平台评审已通过（DSGN_REVIEWING 阶段）
+  dsgn_user_passed      INTEGER NOT NULL DEFAULT 0,        -- 1 = 用户评审已通过（DSGN_REVIEWING 阶段）
   doc_confirmed_at      TEXT,                              -- 需求文档确认时间（N06，不单独占状态）
   run_stable_days       INTEGER NOT NULL DEFAULT 7,        -- 观察期天数：REQ 7 / BUG 3
   ai_degraded           INTEGER NOT NULL DEFAULT 0,        -- 1 = AI 超时降级为模板空壳

@@ -36,6 +36,17 @@ public class ActionResultVO {
     /** 下一状态的到期时间 */
     private String slaDueAt;
 
+    /** 面向用户的提示语（并行确认时告知还差哪几方），由后端按动作语义生成 */
+    private String hint;
+
+    public String getHint() {
+        return hint;
+    }
+
+    public void setHint(String hint) {
+        this.hint = hint;
+    }
+
     public String getTicketId() {
         return ticketId;
     }

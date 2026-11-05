@@ -1,6 +1,9 @@
 package com.cim.reqflow.ticket.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
 import com.cim.reqflow.common.BizCodeException;
 import com.cim.reqflow.common.constant.CommonConstants;
 import com.cim.reqflow.common.util.IdUtils;
@@ -142,6 +145,11 @@ public class TicketFlowService {
             if (action.getAuthCode() != null && !authCodes.contains(action.getAuthCode())) {
                 continue;
             }
+            // 并行确认后，已通过一方的通过/驳回按钮直接隐藏：意见已落定，
+            // 挂个灰按钮反而让人以为还能改
+            if (isSettledParty(action, ticket)) {
+                continue;
+            }
 
             ActionVO vo = new ActionVO();
             vo.setAction(action.getCode());
@@ -199,22 +207,240 @@ public class TicketFlowService {
         String toStatus = resolveToStatus(action, ticket, request);
         String now = LocalDateTime.now().format(CommonConstants.DATE_TIME_FORMATTER);
 
-        applyTransition(ticket, action, fromStatus, toStatus, request, userId, now);
-        updateWithStatusGuard(ticket, fromStatus);
+        // 并行确认的 PASS 动作走专用通道：置位自己那票 + 原子判定三方全过，
+        // 不能走通用「读实体 → 整实体覆盖」的路径——两个人同时点确认时，
+        // 后提交者的实体里是旧标志，会把先提交者刚写的标志覆盖回 0。
+        String effectiveTo;
+        if (isParallelPass(action)) {
+            effectiveTo = applyParallelPass(ticket, action, fromStatus, userId, now);
+        } else {
+            applyTransition(ticket, action, fromStatus, toStatus, request, userId, now);
+            updateWithStatusGuard(ticket, fromStatus);
+            effectiveTo = toStatus;
+        }
 
-        int returnSeq = writeFlowLog(ticket, action, fromStatus, toStatus, request, userId, now);
-        String slaDueAt = refreshSla(ticket, toStatus, now);
+        int returnSeq = writeFlowLog(ticket, action, fromStatus, effectiveTo, request, userId, now);
+        String slaDueAt = refreshSla(ticket, effectiveTo, now);
 
         ActionResultVO result = new ActionResultVO();
         result.setTicketId(ticketId);
         result.setAction(action.getCode());
         result.setFromStatus(fromStatus);
-        result.setToStatus(toStatus);
-        result.setStatusLabel(statusLabel(toStatus));
+        result.setToStatus(effectiveTo);
+        result.setStatusLabel(statusLabel(effectiveTo));
+        result.setHint(buildHint(action, effectiveTo, ticket));
         result.setEscalated(Boolean.FALSE);
         result.setReturnSeq(returnSeq > 0 ? returnSeq : null);
         result.setSlaDueAt(slaDueAt);
         return result;
+    }
+
+    /**
+     * 是否并行置位类动作：三方确认三个 PASS 与设计评审三个 PASS。
+     * 这六个动作不改状态（或条件升级），只置「我方已通过」标志。
+     *
+     * @param action 动作
+     * @return true 表示走并行置位通道
+     */
+    private boolean isParallelPass(FlowAction action) {
+        return action == FlowAction.CONF_MIT_PASS || action == FlowAction.CONF_PLATFORM_PASS
+                || action == FlowAction.CONF_SUPERIOR_PASS
+                || action == FlowAction.DSGN_IT_PASS || action == FlowAction.DSGN_PLATFORM_PASS
+                || action == FlowAction.DSGN_USER_PASS;
+    }
+
+    /**
+     * 执行并行确认的一方置位，并在三方全部通过时原子升级状态。
+     * <p>
+     * 两条条件 UPDATE 的分工：
+     * 第一条「置位」带 own_flag = 0 条件，防止同一方重复确认（影响行数 0 → 状态冲突）；
+     * 第二条「升级」带三方标志全部 = 1 条件，判定与升级在同一条 UPDATE 里完成，
+     * 两个确认人并发提交时，谁的后写谁触发升级，不存在「都置了位却没人升级」的窗口。
+     *
+     * @param ticket     单据（内存对象，方法内同步状态供后续使用）
+     * @param action     动作
+     * @param fromStatus 当前状态（CONFIRMING 或 DSGN_REVIEWING）
+     * @param userId     操作人
+     * @param now        当前时间
+     * @return 实际到达状态：未全过为原状态，全过为目标状态
+     */
+    private String applyParallelPass(ReqTicketDO ticket, FlowAction action, String fromStatus,
+                                     String userId, String now) {
+        boolean confStage = TicketStatus.CONFIRMING.equals(fromStatus);
+        String target = confStage ? TicketStatus.REQ_REVIEW : TicketStatus.DEVELOPING;
+        SFunction<ReqTicketDO, ?> ownFlag = flagOf(action);
+
+        // 第一条：置位自己那票。own_flag = 0 是防重条件，重复点击在这里被拦下
+        int flagged = reqTicketMapper.update(null,
+                Wrappers.<ReqTicketDO>lambdaUpdate()
+                        .set(ownFlag, 1)
+                        .set(ReqTicketDO::getUpdatedAt, now)
+                        .set(ReqTicketDO::getUpdatedBy, userId)
+                        .eq(ReqTicketDO::getId, ticket.getId())
+                        .eq(ReqTicketDO::getStatus, fromStatus)
+                        .eq(ownFlag, 0));
+        if (flagged == 0) {
+            throw new BizCodeException(BIZ_STATE_CONFLICT,
+                    "该环节已确认或单据已被他人处理，请刷新后查看", null);
+        }
+        // 内存对象同步置位：buildHint 读的是这个对象，不同步会把刚确认的一方
+        // 又算进「待确认」名单里（提示词就错了）
+        setFlagOnTicket(ticket, action);
+
+        // 第二条：三方标志全为 1 才升级。判定与升级原子完成
+        LambdaUpdateWrapper<ReqTicketDO> upgrade = Wrappers.<ReqTicketDO>lambdaUpdate()
+                .set(ReqTicketDO::getStatus, target)
+                .set(ReqTicketDO::getUpdatedAt, now)
+                .set(ReqTicketDO::getUpdatedBy, userId)
+                .eq(ReqTicketDO::getId, ticket.getId())
+                .eq(ReqTicketDO::getStatus, fromStatus);
+        if (confStage) {
+            upgrade.eq(ReqTicketDO::getMitPassed, 1)
+                    .eq(ReqTicketDO::getPlatformPassed, 1)
+                    .eq(ReqTicketDO::getSuperiorPassed, 1);
+        } else {
+            upgrade.eq(ReqTicketDO::getDsgnItPassed, 1)
+                    .eq(ReqTicketDO::getDsgnPlatformPassed, 1)
+                    .eq(ReqTicketDO::getDsgnUserPassed, 1)
+                    // 设计评审全过 = 设计确认，验收标准在此刻锁定
+                    .set(ReqTicketDO::getAcceptanceLocked, 1)
+                    .set(ReqTicketDO::getAcceptanceLockedAt, now)
+                    .set(ReqTicketDO::getAcceptanceLockedBy, userId);
+        }
+        int upgraded = reqTicketMapper.update(null, upgrade);
+
+        ticket.setStatus(upgraded > 0 ? target : fromStatus);
+        return ticket.getStatus();
+    }
+
+    /**
+     * 在内存单据对象上同步置位本次动作对应的通过标志。
+     *
+     * @param ticket 单据
+     * @param action 并行置位类动作
+     */
+    private void setFlagOnTicket(ReqTicketDO ticket, FlowAction action) {
+        switch (action) {
+            case CONF_MIT_PASS:
+                ticket.setMitPassed(1);
+                break;
+            case CONF_PLATFORM_PASS:
+                ticket.setPlatformPassed(1);
+                break;
+            case CONF_SUPERIOR_PASS:
+                ticket.setSuperiorPassed(1);
+                break;
+            case DSGN_IT_PASS:
+                ticket.setDsgnItPassed(1);
+                break;
+            case DSGN_PLATFORM_PASS:
+                ticket.setDsgnPlatformPassed(1);
+                break;
+            case DSGN_USER_PASS:
+                ticket.setDsgnUserPassed(1);
+                break;
+            default:
+                break;
+        }
+    }
+
+    /**
+     * 动作对应的一方通过标志字段。
+     *
+     * @param action 并行置位类动作
+     * @return 标志列
+     */
+    private SFunction<ReqTicketDO, ?> flagOf(FlowAction action) {
+        switch (action) {
+            case CONF_MIT_PASS:
+                return ReqTicketDO::getMitPassed;
+            case CONF_PLATFORM_PASS:
+                return ReqTicketDO::getPlatformPassed;
+            case CONF_SUPERIOR_PASS:
+                return ReqTicketDO::getSuperiorPassed;
+            case DSGN_IT_PASS:
+                return ReqTicketDO::getDsgnItPassed;
+            case DSGN_PLATFORM_PASS:
+                return ReqTicketDO::getDsgnPlatformPassed;
+            case DSGN_USER_PASS:
+                return ReqTicketDO::getDsgnUserPassed;
+            default:
+                throw new BizCodeException(BIZ_ACTION_INVALID,
+                        "该动作不是并行置位类动作", null);
+        }
+    }
+
+    /**
+     * 生成动作成功提示语。以前端拼「已 + 状态标签」，环节名拼出来是病句
+     * （「已平台确认」）；改为后端按动作语义生成，前端直接展示。
+     *
+     * @param action     动作
+     * @param toStatus   实际到达状态
+     * @param ticket     单据（读最新标志判断还差哪几方）
+     * @return 提示语
+     */
+    private String buildHint(FlowAction action, String toStatus, ReqTicketDO ticket) {
+        if (action == FlowAction.CONF_MIT_PASS || action == FlowAction.CONF_PLATFORM_PASS
+                || action == FlowAction.CONF_SUPERIOR_PASS) {
+            if (TicketStatus.CONFIRMING.equals(toStatus)) {
+                return "已确认，待" + joinPendingConf(ticket) + "确认";
+            }
+            return "三方确认完成，已进入需求评审";
+        }
+        if (action == FlowAction.DSGN_IT_PASS || action == FlowAction.DSGN_PLATFORM_PASS
+                || action == FlowAction.DSGN_USER_PASS) {
+            if (TicketStatus.DSGN_REVIEWING.equals(toStatus)) {
+                return "已评审通过，待" + joinPendingDsgn(ticket) + "评审";
+            }
+            return "设计评审完成，已进入开发，验收标准已锁定";
+        }
+        if (TicketStatus.DRAFT.equals(toStatus) && action.getReturnPoint() != null) {
+            return "已驳回，需求退回草稿，可修改后重新提交";
+        }
+        if (action.changesStatus()) {
+            return "已流转至「" + statusLabel(toStatus) + "」";
+        }
+        return "操作成功";
+    }
+
+    /**
+     * 三方确认还没过的各方名称，如「平台、上级」。
+     *
+     * @param ticket 单据
+     * @return 顿号分隔的待确认方
+     */
+    private String joinPendingConf(ReqTicketDO ticket) {
+        List<String> pending = new ArrayList<>();
+        if (!isPassed(ticket.getMitPassed())) {
+            pending.add("MIT");
+        }
+        if (!isPassed(ticket.getPlatformPassed())) {
+            pending.add("平台");
+        }
+        if (!isPassed(ticket.getSuperiorPassed())) {
+            pending.add("上级");
+        }
+        return String.join("、", pending);
+    }
+
+    /**
+     * 设计评审还没过的各方名称，如「IT、用户」。
+     *
+     * @param ticket 单据
+     * @return 顿号分隔的待评审方
+     */
+    private String joinPendingDsgn(ReqTicketDO ticket) {
+        List<String> pending = new ArrayList<>();
+        if (!isPassed(ticket.getDsgnItPassed())) {
+            pending.add("IT");
+        }
+        if (!isPassed(ticket.getDsgnPlatformPassed())) {
+            pending.add("平台");
+        }
+        if (!isPassed(ticket.getDsgnUserPassed())) {
+            pending.add("用户");
+        }
+        return String.join("、", pending);
     }
 
     /**
@@ -343,9 +569,13 @@ public class TicketFlowService {
             case ASSIGNEE:
                 return userId.equals(ticket.getAssigneeId());
             case CONFIRMER:
-                return isConfirmer(ticket, userId, confirmers);
+                return isConfirmer(ticket, action, userId, confirmers);
             case LEADER:
-                return roleCodes.contains(FlowRoleSets.MIT_LEADER);
+                // 团队侧动作的权限边界就是角色白名单本身（LEADERS / REVIEWERS / IT_ROLES），
+                // checkRole 已经验过，能走到这里的人必然持有其一。
+                // 原实现只认 MIT_LEADER，评审领导（REVIEW_LEADER）与 IT 运维（IT_OPS）
+                // 全被误伤——zhouba 连「评审通过」都点不动，演示时才暴露。
+                return true;
             default:
                 return false;
         }
@@ -360,20 +590,89 @@ public class TicketFlowService {
      * @param confirmers 三方确认人
      * @return true 表示是确认人
      */
-    private boolean isConfirmer(ReqTicketDO ticket, String userId,
+    /**
+     * 当前用户是否可以执行该确认类动作。
+     * <p>
+     * v0.7 并行化后不再「状态对应唯一确认人」，而是「动作对应一方 + 该方未确认」：
+     * 三方确认中，MIT 动作看 MIT 确认人且 mit_passed=0，平台、上级同理；
+     * 设计评审中，平台动作看平台确认人且 dsgn_platform_passed=0。
+     * 已通过的一方，通过/驳回按钮都不再可用（该方的意见已经落定）。
+     *
+     * @param ticket     单据
+     * @param action     动作
+     * @param userId     当前用户
+     * @param confirmers 三方确认人
+     * @return true 表示该动作轮到此用户
+     */
+    private boolean isConfirmer(ReqTicketDO ticket, FlowAction action, String userId,
                                 ConfirmerResolver.ConfirmerSet confirmers) {
         String status = ticket.getStatus();
-        if (TicketStatus.CONF_MIT.equals(status)) {
-            return userId.equals(confirmers.mitUserId());
+        if (TicketStatus.CONFIRMING.equals(status)) {
+            if (action == FlowAction.CONF_MIT_PASS || action == FlowAction.CONF_MIT_REJECT) {
+                return !isPassed(ticket.getMitPassed())
+                        && userId.equals(confirmers.mitUserId());
+            }
+            if (action == FlowAction.CONF_PLATFORM_PASS
+                    || action == FlowAction.CONF_PLATFORM_REJECT) {
+                return !isPassed(ticket.getPlatformPassed())
+                        && userId.equals(confirmers.platformUserId());
+            }
+            if (action == FlowAction.CONF_SUPERIOR_PASS
+                    || action == FlowAction.CONF_SUPERIOR_REJECT) {
+                return !isPassed(ticket.getSuperiorPassed())
+                        && userId.equals(confirmers.superiorUserId());
+            }
+            return false;
         }
-        if (TicketStatus.CONF_PLATFORM.equals(status)
-                || TicketStatus.DSGN_REVIEW_PLATFORM.equals(status)) {
-            return userId.equals(confirmers.platformUserId());
-        }
-        if (TicketStatus.CONF_SUPERIOR.equals(status)) {
-            return userId.equals(confirmers.superiorUserId());
+        if (TicketStatus.DSGN_REVIEWING.equals(status)
+                && (action == FlowAction.DSGN_PLATFORM_PASS
+                || action == FlowAction.DSGN_PLATFORM_RETURN)) {
+            return !isPassed(ticket.getDsgnPlatformPassed())
+                    && userId.equals(confirmers.platformUserId());
         }
         return false;
+    }
+
+    /**
+     * 通过标志是否已置位。数据库默认值是 0，历史行迁移前可能为 null，统一按未置位处理。
+     *
+     * @param flag 标志值
+     * @return true 表示已置位
+     */
+    private boolean isPassed(Integer flag) {
+        return flag != null && flag == 1;
+    }
+
+    /**
+     * 该动作所属的一方是否已经确认/评审通过。通过后这一方的全部动作（含驳回）都不再展示。
+     *
+     * @param action 动作
+     * @param ticket 单据
+     * @return true 表示该方已落定，动作应隐藏
+     */
+    private boolean isSettledParty(FlowAction action, ReqTicketDO ticket) {
+        switch (action) {
+            case CONF_MIT_PASS:
+            case CONF_MIT_REJECT:
+                return isPassed(ticket.getMitPassed());
+            case CONF_PLATFORM_PASS:
+            case CONF_PLATFORM_REJECT:
+                return isPassed(ticket.getPlatformPassed());
+            case CONF_SUPERIOR_PASS:
+            case CONF_SUPERIOR_REJECT:
+                return isPassed(ticket.getSuperiorPassed());
+            case DSGN_IT_PASS:
+            case DSGN_IT_RETURN:
+                return isPassed(ticket.getDsgnItPassed());
+            case DSGN_PLATFORM_PASS:
+            case DSGN_PLATFORM_RETURN:
+                return isPassed(ticket.getDsgnPlatformPassed());
+            case DSGN_USER_PASS:
+            case DSGN_USER_RETURN:
+                return isPassed(ticket.getDsgnUserPassed());
+            default:
+                return false;
+        }
     }
 
     /**
@@ -463,12 +762,10 @@ public class TicketFlowService {
                 break;
             case SUBMIT_DESIGN:
                 ticket.setDesignAt(now);
-                break;
-            case DSGN_USER_PASS:
-                // 用户评审通过是验收标准锁定的时点，之后不允许再改
-                ticket.setAcceptanceLocked(1);
-                ticket.setAcceptanceLockedAt(now);
-                ticket.setAcceptanceLockedBy(userId);
+                // 重新提交设计 = 设计评审从头再来，三方标志清零（并行化后各方可先可后）
+                ticket.setDsgnItPassed(0);
+                ticket.setDsgnPlatformPassed(0);
+                ticket.setDsgnUserPassed(0);
                 break;
             case SUBMIT_SELF_TEST:
                 ticket.setDevAt(now);
@@ -478,6 +775,19 @@ public class TicketFlowService {
                 break;
             case DOC_CONFIRM:
                 ticket.setDocConfirmedAt(now);
+                // 重新进三方确认 = 三方标志清零（驳回改完重提的场景）
+                ticket.setMitPassed(0);
+                ticket.setPlatformPassed(0);
+                ticket.setSuperiorPassed(0);
+                break;
+            case SKIP_CONF_MIT:
+                ticket.setMitPassed(1);
+                break;
+            case SKIP_CONF_PLATFORM:
+                ticket.setPlatformPassed(1);
+                break;
+            case SKIP_CONF_SUPERIOR:
+                ticket.setSuperiorPassed(1);
                 break;
             case MONITOR_PASS:
                 // 监控期没有独立单据，结论只能挂在需求单上。

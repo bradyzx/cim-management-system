@@ -1,6 +1,12 @@
 -- =====================================================================
 -- 需求全生命周期管理系统 · 表结构（Oracle 12c+）
--- 版本：v1.6    与 schema-sqlite.sql 字段一一对应
+-- 版本：v1.7    与 schema-sqlite.sql 字段一一对应
+--
+-- v1.7 变更（与 SQLite 侧同步，v0.7 并行化，27 态改 23 态）：
+--   1. req_ticket 补 6 列：mit_passed / platform_passed / superior_passed /
+--      dsgn_it_passed / dsgn_platform_passed / dsgn_user_passed
+--   2. 三方确认三态合并为 CONFIRMING、设计评审三态合并为 DSGN_REVIEWING，
+--      退回点合并为 ⑱ RT_CONFS 与 ⑲ RT_DSGN_REVIEW
 --
 -- v1.6 变更（与 SQLite 侧同步，对齐 02 v0.6 的 27 态与 17 个退回点）：
 --   1. 新建 5 表：req_project / req_system / req_doc / req_ai_clarify / req_check_item
@@ -365,6 +371,13 @@ CREATE TABLE req_ticket (
   system_id             VARCHAR2(64 CHAR)  NOT NULL,       -- 所属系统（主关联），下拉按当前项目过滤
   mit_skipped           NUMBER(1)          DEFAULT 0 NOT NULL,
   platform_skipped      NUMBER(1)          DEFAULT 0 NOT NULL,
+  -- v0.7 并行化：三方确认与设计评审不分先后，各方通过后置 1；全 1 由服务层原子升级状态
+  mit_passed            NUMBER(1)          DEFAULT 0 NOT NULL,   -- 1 = MIT 已确认（CONFIRMING 阶段）
+  platform_passed       NUMBER(1)          DEFAULT 0 NOT NULL,   -- 1 = 平台已确认（CONFIRMING 阶段）
+  superior_passed       NUMBER(1)          DEFAULT 0 NOT NULL,   -- 1 = 上级已确认（CONFIRMING 阶段）
+  dsgn_it_passed        NUMBER(1)          DEFAULT 0 NOT NULL,   -- 1 = IT 评审已通过（DSGN_REVIEWING 阶段）
+  dsgn_platform_passed  NUMBER(1)          DEFAULT 0 NOT NULL,   -- 1 = 平台评审已通过（DSGN_REVIEWING 阶段）
+  dsgn_user_passed      NUMBER(1)          DEFAULT 0 NOT NULL,   -- 1 = 用户评审已通过（DSGN_REVIEWING 阶段）
   doc_confirmed_at      TIMESTAMP(6),
   run_stable_days       NUMBER(3)          DEFAULT 7 NOT NULL,   -- 观察期天数：REQ 7 / BUG 3
   ai_degraded           NUMBER(1)          DEFAULT 0 NOT NULL,

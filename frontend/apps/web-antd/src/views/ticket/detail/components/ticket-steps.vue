@@ -30,18 +30,19 @@ const 主链: 主链节点[] = [
     label: '提出需求',
     states: ['DRAFT', 'SUBMITTED', 'AI_ANALYZING', 'AI_CLARIFYING', 'REQ_DOC_DRAFTED'],
   },
-  // 三方确认（MIT / 平台 / 上级）在流程上是审批，展示上合并为一步
+  // 三方确认（MIT / 平台 / 上级）在流程上是审批，展示上合并为一步；
+  // v0.7 并行化后三方不分先后，合并后的状态码是 CONFIRMING
   {
     key: 'CONFIRM',
     label: '需求确认',
-    states: ['CONF_MIT', 'CONF_PLATFORM', 'CONF_SUPERIOR'],
+    states: ['CONFIRMING'],
   },
   { key: 'ASSIGN', label: '派单', states: ['PENDING_ASSIGN', 'ASSIGNED'] },
-  // 设计评审三个环节都算「设计还在确认」，不单列
+  // 设计评审三个环节都算「设计还在确认」，不单列；并行化后状态码是 DSGN_REVIEWING
   {
     key: 'DESIGN',
     label: '设计',
-    states: ['DESIGNING', 'DSGN_REVIEW_IT', 'DSGN_REVIEW_PLATFORM', 'DSGN_REVIEW_USER'],
+    states: ['DESIGNING', 'DSGN_REVIEWING'],
   },
   { key: 'DEV', label: '开发', states: ['DEVELOPING', 'SELF_TEST'] },
   // 部署是 UAT 的前置动作，合并展示
