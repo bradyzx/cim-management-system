@@ -9,6 +9,7 @@ import com.cim.reqflow.system.dto.UserStatusDTO;
 import com.cim.reqflow.system.service.UserService;
 import com.cim.reqflow.system.vo.UserDetailVO;
 import com.cim.reqflow.system.vo.UserListVO;
+import com.cim.reqflow.system.vo.UserOptionVO;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -47,6 +48,18 @@ public class SystemUserController {
     @GetMapping("/list")
     public R<PageResult<UserListVO>> list(UserQueryDTO query) {
         return R.ok(userService.listUsers(query));
+    }
+
+    /**
+     * 派单候选人：只有持有「MIT 开发人员」角色的启用用户。
+     * 派单弹窗的下拉框用它，替代原先直接拉全量用户的做法 ——
+     * 派给非开发角色，单据会卡死在「待接收」，因为接收动作不对该角色开放。
+     *
+     * @return 候选人列表，含姓名与部门名
+     */
+    @GetMapping("/assignees")
+    public R<List<UserOptionVO>> listAssignees() {
+        return R.ok(userService.listAssignees());
     }
 
     /**

@@ -219,6 +219,17 @@ public class TicketDetailService {
             item.setCreatedAt(log.getCreatedAt());
             timeline.add(item);
         }
+
+        // 括号里的人：from 侧是本条操作人，to 侧是下一条的操作人。
+        // 要等整条时间线都组装完才能回填 —— 最后一条没有「下一条」，
+        // toOwner 留空，界面就不画括号（单据刚进这一步，确实还没人接）。
+        for (int i = 0; i < timeline.size(); i++) {
+            TimelineItemVO item = timeline.get(i);
+            item.setFromOwner(item.getOperatorName());
+            if (i + 1 < timeline.size()) {
+                item.setToOwner(timeline.get(i + 1).getOperatorName());
+            }
+        }
         return timeline;
     }
 

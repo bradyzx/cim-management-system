@@ -186,24 +186,33 @@ async function 确保原因选项() {
   }
 }
 
-/** 拉可选承办人。一期不做角色过滤，50 人规模下拉带搜索足够。 */
+/**
+ * 拉可选承办人。后端只返回持有开发角色的启用用户。
+ *
+ * 不在前端自己按角色过滤：角色数据在库里随时会变，前端硬编码一份等于两处维护；
+ * 而且派给非开发角色，单据会卡死在「待接收」——承办人没有接收按钮，
+ * 谁都推不动。所以过滤与校验都放后端，这里只管取。
+ */
 async function 确保用户选项() {
   if (用户已加载) {
     return;
   }
   try {
-    const 结果 = await requestClient.get<{
-      items: { deptName?: null | string; id: string; realName: string }[];
-    }>('/system/user/list', {
-      params: { page: 1, pageSize: 200, status: 'ACTIVE' },
-    });
-    用户选项.value = (结果.items ?? []).map((用户) => ({
+    const 列表 = await requestClient.get<{
+      deptName?: null | string;
+      id: string;
+      realName: string;
+    }[]>('/system/user/assignees');
+    用户选项.value = (列表 ?? []).map((用户) => ({
       label: 用户.deptName ? `${用户.realName}（${用户.deptName}）` : 用户.realName,
       value: 用户.id,
     }));
     用户已加载 = true;
+    if (用户选项.value.length === 0) {
+      message.warning('当前没有可派单的开发人员，请先在用户管理里分配「MIT 开发人员」角色');
+    }
   } catch {
-    message.error('人员列表加载失败，请刷新重试');
+    message.error('开发人员列表加载失败，请刷新重试');
   }
 }
 

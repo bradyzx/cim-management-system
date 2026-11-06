@@ -23,6 +23,7 @@ import com.cim.reqflow.system.mapper.SysUserMapper;
 import com.cim.reqflow.system.mapper.SysUserRoleMapper;
 import com.cim.reqflow.system.vo.UserDetailVO;
 import com.cim.reqflow.system.vo.UserListVO;
+import com.cim.reqflow.system.vo.UserOptionVO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -45,6 +46,12 @@ import java.util.Map;
  */
 @Service
 public class UserService {
+
+    /** 开发角色编码：派单只能派给持有该角色的人 */
+    private static final String ROLE_CODE_MIT_DEV = "MIT_DEV";
+
+    /** 用户状态：启用。停用的人不能再接单 */
+    private static final String USER_STATUS_ACTIVE = "ACTIVE";
 
     /** 用户表数据访问 */
     private final SysUserMapper sysUserMapper;
@@ -137,6 +144,57 @@ public class UserService {
             rows.add(row);
         }
         return new PageResult<>(rows, page.getTotal());
+    }
+
+    /**
+     * 派单候选人：只返回持有「MIT 开发人员」角色的启用用户。
+     * <p>
+     * 为什么不给 {@link #listUsers} 加一个 roleCode 过滤参数了事：派单候选人是一条固定的
+     * 业务口径（只有开发能承办），用户管理列表要能查全员。合成一个接口，调用方迟早漏传参数，
+     * 把全员又放回下拉框里 —— 派给非开发角色，单据会卡死在「待接收」，
+     * 因为接收动作只对开发角色开放。
+     *
+     * @return 候选人列表，含部门名便于区分同名；没有开发角色时返回空列表
+     */
+    public List<UserOptionVO> listAssignees() {
+        // 第一步：按角色编码找角色 ID。编码是稳定标识，不按角色名称匹配
+        SysRoleDO devRole = sysRoleMapper.selectOne(
+                Wrappers.<SysRoleDO>lambdaQuery().eq(SysRoleDO::getRoleCode, ROLE_CODE_MIT_DEV));
+        if (devRole == null) {
+            return List.of();
+        }
+
+        // 第二步：该角色绑定了哪些人
+        List<SysUserRoleDO> relations = sysUserRoleMapper.selectList(
+                Wrappers.<SysUserRoleDO>lambdaQuery().eq(SysUserRoleDO::getRoleId, devRole.getId()));
+        if (relations.isEmpty()) {
+            return List.of();
+        }
+        List<String> userIds = new ArrayList<>(relations.size());
+        for (SysUserRoleDO relation : relations) {
+            userIds.add(relation.getUserId());
+        }
+
+        // 第三步：只保留启用的人。停用后角色绑定还在，但已经不在岗，不能再接单
+        List<SysUserDO> users = sysUserMapper.selectList(
+                Wrappers.<SysUserDO>lambdaQuery()
+                        .in(SysUserDO::getId, userIds)
+                        .eq(SysUserDO::getStatus, USER_STATUS_ACTIVE)
+                        .orderByAsc(SysUserDO::getUsername));
+        if (users.isEmpty()) {
+            return List.of();
+        }
+
+        Map<String, String> deptNameMap = loadDeptNameMap();
+        List<UserOptionVO> options = new ArrayList<>(users.size());
+        for (SysUserDO user : users) {
+            UserOptionVO option = new UserOptionVO();
+            option.setId(user.getId());
+            option.setRealName(user.getRealName());
+            option.setDeptName(deptNameMap.getOrDefault(user.getPrimaryDeptId(), ""));
+            options.add(option);
+        }
+        return options;
     }
 
     /**

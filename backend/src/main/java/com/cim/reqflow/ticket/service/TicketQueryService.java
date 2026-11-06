@@ -141,7 +141,22 @@ public class TicketQueryService {
         long pageSize = condition.getPageSize() == null
                 ? CommonConstants.DEFAULT_PAGE_SIZE : condition.getPageSize();
         Page<ReqTicketDO> page = reqTicketMapper.selectPage(new Page<>(pageNo, pageSize), wrapper);
-        List<ReqTicketDO> tickets = page.getRecords();
+        return new PageResult<>(toListRows(page.getRecords()), page.getTotal());
+    }
+
+    /**
+     * 把单据实体批量转成列表行：字典与名称一次加载完，再逐条组装。
+     * <p>
+     * 抽成公开方法是为了给待办复用。待办也要展示单号、状态、优先级、提出人这些列，
+     * 如果各写一遍，同一个状态码在两处翻译成不同的中文也没人会发现。
+     *
+     * @param tickets 单据实体，顺序与返回结果一致
+     * @return 列表行
+     */
+    public List<TicketListVO> toListRows(List<ReqTicketDO> tickets) {
+        if (tickets == null || tickets.isEmpty()) {
+            return new ArrayList<>();
+        }
 
         Map<String, SysDictDataDO> statusDict = loadDict(DICT_STATUS);
         Map<String, SysDictDataDO> priorityDict = loadDict(DICT_PRIORITY);
@@ -175,7 +190,7 @@ public class TicketQueryService {
             row.setCreatedAt(ticket.getCreatedAt());
             rows.add(row);
         }
-        return new PageResult<>(rows, page.getTotal());
+        return rows;
     }
 
     /**

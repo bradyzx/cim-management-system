@@ -397,6 +397,10 @@ def 建菜单(键, 名称, 类型, 上级键, 路径, 组件, 权限码, 图标,
 建菜单("basic_system", "系统管理", "MENU", "basic_dir", "/basic/system",
        "basic/system/index", None, "lucide:server", 2)
 
+# --- 技术档案（静态查阅页，内容与 03-技术方案与约束.md 同步维护，不挂任何接口）---
+建菜单("tech_arch", "技术架构", "MENU", None, "/tech-arch", "tech-arch/index", None,
+       "lucide:layers", 5)
+
 # --- 按钮权限 ---
 建菜单("btn_create", "提单", "BUTTON", "req_list", None, None, "ticket:create", None, 1)
 建菜单("btn_assign", "派单", "BUTTON", "req_pool", None, None, "ticket:assign", None, 1)
@@ -484,16 +488,24 @@ def 建菜单(键, 名称, 类型, 上级键, 路径, 组件, 权限码, 图标,
               "rpt_dir", "rpt_dash",
               "sys_dir", "sys_user", "sys_role", "sys_menu", "sys_dept", "sys_dict",
               "sys_scope",
-              "basic_dir", "basic_project", "basic_system"],
+              "basic_dir", "basic_project", "basic_system",
+              "tech_arch"],
     "leader": ["req_dir", "req_todo", "req_pool", "req_list", "req_bug", "req_detail",
-               "rpt_dir", "rpt_dash"],
-    "dev": ["req_dir", "req_todo", "req_list", "req_bug", "req_detail"],
-    "reporter": ["req_dir", "req_todo", "req_list", "req_detail"],
-    "deptmgr": ["req_dir", "req_list", "req_detail", "rpt_dir", "rpt_dash"],
+               "rpt_dir", "rpt_dash",
+               "tech_arch"],
+    "dev": ["req_dir", "req_todo", "req_list", "req_bug", "req_detail",
+            "tech_arch"],
+    "reporter": ["req_dir", "req_todo", "req_list", "req_detail",
+                 "tech_arch"],
+    "deptmgr": ["req_dir", "req_list", "req_detail", "rpt_dir", "rpt_dash",
+                "tech_arch"],
     # 三个新增角色：只需要「待我处理」和「单据详情」，不需要系统管理与报表全量
-    "platform": ["req_dir", "req_todo", "req_list", "req_detail", "rpt_dir", "rpt_dash"],
-    "reviewer": ["req_dir", "req_list", "req_detail", "rpt_dir", "rpt_dash"],
-    "itops": ["req_dir", "req_todo", "req_list", "req_detail"],
+    "platform": ["req_dir", "req_todo", "req_list", "req_detail", "rpt_dir", "rpt_dash",
+                 "tech_arch"],
+    "reviewer": ["req_dir", "req_list", "req_detail", "rpt_dir", "rpt_dash",
+                 "tech_arch"],
+    "itops": ["req_dir", "req_todo", "req_list", "req_detail",
+              "tech_arch"],
 }
 
 角色按钮 = {

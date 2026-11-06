@@ -43,6 +43,20 @@ function 点颜色(条: TicketTimelineItem): string {
 function 短时间(时间?: null | string): string {
   return 时间 ? 时间.slice(0, 16) : '-';
 }
+
+/**
+ * 状态名后面补上经办人：`设计中(李四)`。
+ *
+ * 光看「设计中 → 设计评审中」不知道谁在设计、谁接着评审，补上名字才读得通。
+ * 没有名字（单据刚进这一步、还没人动手）就只给状态名，不留一对空括号。
+ *
+ * @param 状态 状态中文名
+ * @param 人名 该状态的经办人，可为空
+ * @returns 带括号的展示文本
+ */
+function 带人名(状态: string, 人名?: null | string): string {
+  return 人名 ? `${状态}(${人名})` : 状态;
+}
 </script>
 
 <template>
@@ -58,7 +72,8 @@ function 短时间(时间?: null | string): string {
       <div class="mt-1 flex flex-wrap items-center gap-2 text-sm">
         <span class="font-medium">{{ 条.actionLabel }}</span>
         <span class="text-gray-500 dark:text-gray-400">
-          {{ 条.fromStatusLabel || '—' }} → {{ 条.toStatusLabel }}
+          {{ 带人名(条.fromStatusLabel || '—', 条.fromOwner) }} →
+          {{ 带人名(条.toStatusLabel, 条.toOwner) }}
         </span>
         <Tag v-if="条.returnSeq" color="orange">第 {{ 条.returnSeq }} 次退回</Tag>
         <Tag v-if="条.reasonLabel" color="red">{{ 条.reasonLabel }}</Tag>

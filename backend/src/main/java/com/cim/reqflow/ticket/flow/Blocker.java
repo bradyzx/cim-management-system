@@ -28,6 +28,12 @@ public record Blocker(String bizCode, String message, Map<String, Object> detail
     public static final String COVERAGE_INSUFFICIENT = "COVERAGE_INSUFFICIENT";
     /** 豁免权限不足或缺少理由 */
     public static final String WAIVER_FORBIDDEN = "WAIVER_FORBIDDEN";
+    /** 需求文档不完整，未达确认条件 */
+    public static final String DOC_INCOMPLETE = "DOC_INCOMPLETE";
+    /** 验收标准为空，未达设计评审通过（锁定）条件 */
+    public static final String CRITERIA_EMPTY = "CRITERIA_EMPTY";
+    /** 点检清单里的重点功能还有没点的 */
+    public static final String CHECK_ITEMS_PENDING = "CHECK_ITEMS_PENDING";
 
     /**
      * 无附加数据的阻塞项。

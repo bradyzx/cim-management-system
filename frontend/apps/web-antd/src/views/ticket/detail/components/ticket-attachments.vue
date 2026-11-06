@@ -221,16 +221,17 @@ async function 删除(附件: TicketAttachment) {
       </div>
     </div>
 
-    <!-- 选择框与按钮同一行（用户要求）。Select 用 flex-1 弹性收缩，
-         窄卡放不下时按钮自动换行，不会再把提示文字挤出卡片。 -->
+    <!-- 选择框与按钮同一行（用户要求）。Select 用内联 flex 弹性收缩：
+         Tailwind 的 flex-1 对 .ant-select 不生效 —— antd 的 css-in-js 会给它设 width，
+         注入顺序晚于 Tailwind，同特异性下类名被盖掉，Select 撑宽后把按钮挤出卡片。 -->
     <div class="mb-2 flex flex-wrap items-center gap-2">
       <Select
         v-model:value="已选类型"
         :disabled="closed"
         :options="类型选项"
-        class="min-w-0 flex-1"
         placeholder="选择交付物类型"
         show-search
+        style="flex: 1 1 0; min-width: 0"
       />
       <Upload
         :custom-request="上传"

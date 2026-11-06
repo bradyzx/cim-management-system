@@ -10,6 +10,9 @@ import com.cim.reqflow.system.entity.SysUserDO;
 import com.cim.reqflow.system.mapper.ReqSlaConfigMapper;
 import com.cim.reqflow.system.mapper.SysNoSequenceMapper;
 import com.cim.reqflow.system.mapper.SysUserMapper;
+import com.cim.reqflow.ticket.doc.DocMarkdown;
+import com.cim.reqflow.ticket.doc.DocSections;
+import com.cim.reqflow.ticket.doc.DocValidator;
 import com.cim.reqflow.ticket.dto.TicketCreateDTO;
 import com.cim.reqflow.ticket.entity.ReqAcceptanceCriteriaDO;
 import com.cim.reqflow.ticket.entity.ReqDocDO;
@@ -27,6 +30,9 @@ import com.cim.reqflow.ticket.mapper.ReqTicketMapper;
 import com.cim.reqflow.ticket.sla.SlaCalculator;
 import com.cim.reqflow.ticket.vo.TicketCreatedVO;
 import com.cim.reqflow.ticket.vo.TicketDetailVO;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -75,6 +81,9 @@ public class TicketCreateService {
 
     /** AI 规则模板的模型标识，写进 req_doc 便于区分二期接入的真模型 */
     private static final String 规则模板模型 = "RULE_TEMPLATE_V1";
+
+    /** 构造 12 节 JSON，线程安全 */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** SLA 未配置时的时限（不计时） */
     private static final double 无时限 = 0.0;
@@ -230,8 +239,8 @@ public class TicketCreateService {
         ticket.setSlaDueAt(算时限(dto.getTicketType(), ticket.getStatus(), now));
         reqTicketMapper.updateById(ticket);
 
-        // 需求文档：规则模板生成骨架
-        生成需求文档(ticket, dto, now);
+        // 需求文档：规则模板生成 12 节骨架
+        生成需求文档(ticket, dto, 最高相似度, now);
 
         // 验收标准拆条：有内容才落子表，UAT 覆盖率的分母靠它
         拆验收标准(ticket.getId(), dto.getAcceptanceCriteria(), now);
@@ -319,70 +328,113 @@ public class TicketCreateService {
     }
 
     /**
-     * 规则模板生成需求文档：12 节骨架，已知字段填充，
-     * 其余留空由提出人在「文档确认」环节补齐（或二期 LLM 生成）。
+     * 规则模板生成需求文档：12 节骨架，提单页已经有的字段直接填，其余留空待提出人补。
+     * <p>
+     * 键名严格照契约 `11` §8.1.1 的定稿，不自己另起名字 —— 前端按 key 渲染卡片、
+     * 点检项从第 5 节取功能清单、覆盖率从第 10 节取分母，改一个 key 就断一处，
+     * 而且断得没有报错，只是那一节显示空白。
+     * <p>
+     * Markdown 正文由 {@code DocMarkdown} 从同一份 JSON 渲染，不在这里另写一套，
+     * 否则表单改了正文不变。
      *
-     * @param ticket 单据
-     * @param dto    表单
-     * @param now    当前时间
+     * @param ticket   单据
+     * @param dto      提单表单
+     * @param 最高相似度 查重最高加权相似度，写进第 12 节
+     * @param now      当前时间
      */
-    private void 生成需求文档(ReqTicketDO ticket, TicketCreateDTO dto, String now) {
-        StringBuilder md = new StringBuilder();
-        md.append("# ").append(ticket.getTitle()).append("\n\n");
-        md.append("## 一、需求背景\n\n").append(nullToEmpty(dto.getContentAsis())).append("\n\n");
-        md.append("## 二、需求目标\n\n").append(nullToEmpty(dto.getContentTobe())).append("\n\n");
-        md.append("## 三、需求简述\n\n").append(nullToEmpty(dto.getDescription())).append("\n\n");
-        md.append("## 四、验收标准\n\n");
-        md.append(dto.getAcceptanceCriteria() == null || dto.getAcceptanceCriteria().isEmpty()
-                ? "（待补充）" : dto.getAcceptanceCriteria());
-        md.append("\n\n## 五、ROI\n\n").append(nullToEmpty(dto.getRoiDesc())).append("\n");
-        if (dto.getRoiDesc() == null || dto.getRoiDesc().isEmpty()) {
-            md.append("\n（待补充）\n");
-        }
+    private void 生成需求文档(ReqTicketDO ticket, TicketCreateDTO dto,
+                              double 最高相似度, String now) {
+        ObjectNode sections = MAPPER.createObjectNode();
 
-        // doc_json：契约 8.1 的三个结构化节先落（功能清单空、工作量空、验收标准投影），
-        // 其余节留空对象，键名随二期 LLM 生成时一并定稿
-        StringBuilder json = new StringBuilder();
-        json.append("{\"schemaVersion\":1,\"sections\":{");
-        json.append("\"s1_background\":{\"content\":\"").append(转义(dto.getContentAsis())).append("\"},");
-        json.append("\"s2_goal\":{\"content\":\"").append(转义(dto.getContentTobe())).append("\"},");
-        json.append("\"s5_functions\":{\"items\":[]},");
-        json.append("\"s9_effort\":{\"minDays\":null,\"maxDays\":null},");
-        json.append("\"s10_acceptance\":{\"items\":[");
-        if (dto.getAcceptanceCriteria() != null && !dto.getAcceptanceCriteria().isEmpty()) {
-            String[] 条目 = dto.getAcceptanceCriteria().split("\\r?\\n");
-            for (int i = 0; i < 条目.length; i++) {
-                String 条 = 条目[i].trim();
+        // 第 1~4 节：提单页面的四个输入框直接映射
+        sections.putObject(DocSections.NAME).put("content", ticket.getTitle());
+        sections.putObject(DocSections.ASIS).put("content", nullToEmpty(dto.getContentAsis()));
+        // 痛点单独成节：提单只有一个「现状」输入框，影响与量化留给提出人确认前补
+        sections.putObject(DocSections.PAIN).put("content", "").putArray("metrics");
+        sections.putObject(DocSections.TOBE).put("content", nullToEmpty(dto.getContentTobe()));
+
+        // 第 5 节：功能清单由提出人逐条补，系统不猜。编号规则见契约 §8.1.3
+        sections.putObject(DocSections.FUNCTIONS).putArray("items");
+        // 第 6 节：非功能要求，同样不猜
+        sections.putObject(DocSections.NFR).putArray("items");
+
+        // 第 7 节：联动范围能自动填系统，省一次人工输入；部门与影响说明留空
+        ObjectNode scope = sections.putObject(DocSections.SCOPE);
+        scope.putArray("systems").addObject()
+                .put("systemCode", nullToEmpty(ticket.getSystemCode()))
+                .put("impact", "");
+        scope.putArray("depts");
+
+        // 第 8 节：优先级取提单选的等级，三项打分留 0，理由待填
+        ObjectNode priority = sections.putObject(DocSections.PRIORITY);
+        priority.put("level", nullToEmpty(ticket.getPriority()));
+        priority.putObject("scores").put("impact", 0).put("urgency", 0).put("compliance", 0);
+        priority.put("reason", "");
+
+        // 第 9 节：工作量不估，标记为 AI 估算待 MIT 确认（契约 §8.1.4 的水印规则）
+        ObjectNode effort = sections.putObject(DocSections.EFFORT);
+        effort.putNull("minDays").putNull("maxDays").putNull("suggestReleaseDate");
+        effort.put("aiEstimated", 1);
+        effort.putNull("confirmedBy");
+
+        // 第 10 节：提单时填的验收标准按行拆条，seq 从 1 起
+        ArrayNode 验收条目 = sections.putObject(DocSections.ACCEPTANCE).putArray("items");
+        int 序号 = 0;
+        if (dto.getAcceptanceCriteria() != null) {
+            for (String 行 : dto.getAcceptanceCriteria().split("\\r?\\n")) {
+                String 条 = 行.trim().replaceFirst("^\\d+[.、．]\\s*", "");
                 if (条.isEmpty()) {
                     continue;
                 }
-                if (i > 0) {
-                    json.append(",");
-                }
-                json.append("{\"seq\":").append(i + 1)
-                        .append(",\"text\":\"").append(转义(条)).append("\"}");
+                序号++;
+                验收条目.addObject().put("seq", 序号).put("text", 条);
             }
         }
-        json.append("]}");
-        for (int 节 = 3; 节 <= 12; 节++) {
-            if (节 == 5 || 节 == 9 || 节 == 10) {
-                continue;
-            }
-            json.append(",\"s").append(节).append("_placeholder\":{\"content\":\"\"}");
+
+        // 第 11 节：附件清单由人维护，系统不清楚该交什么材料
+        sections.putObject(DocSections.ATTACHMENTS).putArray("items");
+
+        // 第 12 节：规则版预审结论。分数按「必填节填了几项」算，可解释、不瞎编
+        ObjectNode review = sections.putObject(DocSections.AI_REVIEW);
+        review.put("dupScore", 最高相似度);
+        review.put("verdict", 最高相似度 > 0.5 ? "SIMILAR" : "NEW");
+        review.put("completeness", DocValidator.completeness(sections));
+        ArrayNode 风险 = review.putArray("risks");
+        if (是空的(sections.path(DocSections.FUNCTIONS).path("items"))) {
+            风险.add("功能清单待补充：点检项草稿与用例覆盖率都依赖它");
         }
-        json.append("}}");
+        if (是空的(验收条目)) {
+            风险.add("验收标准为空：UAT 覆盖率无法计算，确认时会被拦下");
+        }
+        风险.add("工作量区间待评估：派单的默认工时取自该区间中值");
+        review.putArray("unclarified");
+
+        ObjectNode root = MAPPER.createObjectNode();
+        root.put("schemaVersion", 1);
+        root.set("sections", sections);
+        String docJson = root.toString();
 
         ReqDocDO doc = new ReqDocDO();
         doc.setId(IdUtils.nextId());
         doc.setTicketId(ticket.getId());
         doc.setVersion(1);
-        doc.setContentMd(md.toString());
-        doc.setDocJson(json.toString());
+        doc.setDocJson(docJson);
+        doc.setContentMd(DocMarkdown.render(docJson));
         doc.setAiModel(规则模板模型);
         doc.setAiDegraded(0);
         doc.setCreatedAt(now);
         doc.setUpdatedAt(now);
         reqDocMapper.insert(doc);
+    }
+
+    /**
+     * 数组节点是否为空。
+     *
+     * @param node 节点
+     * @return 空或非数组返回 true
+     */
+    private boolean 是空的(com.fasterxml.jackson.databind.JsonNode node) {
+        return node == null || !node.isArray() || node.isEmpty();
     }
 
     /**
@@ -444,22 +496,6 @@ public class TicketCreateService {
         logDO.setReturnPoint(returnPoint);
         logDO.setCreatedAt(now);
         reqFlowLogMapper.insert(logDO);
-    }
-
-    /**
-     * JSON 字符串转义：反斜杠与双引号，换行在 doc_json 里替换为空格
-     * （结构化字段不承载换行，Markdown 正文才有）。
-     *
-     * @param 文本 原文
-     * @return 可安全嵌入 JSON 的文本
-     */
-    private String 转义(String 文本) {
-        if (文本 == null) {
-            return "";
-        }
-        return 文本.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replaceAll("\\r?\\n", " ");
     }
 
     /**

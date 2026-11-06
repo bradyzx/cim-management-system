@@ -35,6 +35,21 @@ public class TimelineItemVO {
     /** 操作人姓名；系统动作为「系统」 */
     private String operatorName;
 
+    /**
+     * 动作前状态的经办人。
+     * <p>
+     * 就是本条的操作人：他正是站在 from 这个状态下动的这一下。
+     * 单看「设计中 → 设计评审中」不知道谁设计的，括号补上才读得懂。
+     */
+    private String fromOwner;
+
+    /**
+     * 动作后状态的经办人：下一条记录的操作人，即谁在目标状态下接着动手。
+     * <p>
+     * 单据刚进目标状态、还没人操作时为空，界面就不画括号 —— 空括号比没有更难看。
+     */
+    private String toOwner;
+
     /** 退回原因码 */
     private String reasonCode;
 
@@ -112,6 +127,22 @@ public class TimelineItemVO {
 
     public void setOperatorName(String operatorName) {
         this.operatorName = operatorName;
+    }
+
+    public String getFromOwner() {
+        return fromOwner;
+    }
+
+    public void setFromOwner(String fromOwner) {
+        this.fromOwner = fromOwner;
+    }
+
+    public String getToOwner() {
+        return toOwner;
+    }
+
+    public void setToOwner(String toOwner) {
+        this.toOwner = toOwner;
     }
 
     public String getReasonCode() {

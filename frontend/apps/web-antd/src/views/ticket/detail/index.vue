@@ -2,13 +2,14 @@
 /**
  * 需求单详情页（03 文档 6.1 节说的「整套系统的核心页」）。
  *
- * 四个数据源分开拉：
+ * 五个数据源分开拉：
  * - `/detail`       单据正文与时间线，必须成功，失败则整页不可用；
  * - `/actions`      当前用户能做什么，按人算，不能缓存；
+ * - `/doc`          12 节需求文档，BUG/INC 单可能没有，失败不影响其余；
  * - `/attachments`  附件列表；
  * - `/attach-rules` 本环节还缺什么材料。
  *
- * 后三个互不阻塞：任何一个接口挂了，其余内容仍然要看得到。
+ * 后四个互不阻塞：任何一个接口挂了，其余内容仍然要看得到。
  * 按钮可用性只认 `/actions`，页面不自己判角色 —— 判两遍必然和真实规则对不上。
  */
 import type {
@@ -17,6 +18,8 @@ import type {
   TicketAttachRuleStatus,
   TicketAttachment,
   TicketDetail,
+  TicketDoc,
+  TicketFlowStep,
 } from '#/api/ticket';
 
 import { computed, onMounted, ref } from 'vue';
@@ -37,6 +40,8 @@ import {
 
 import {
   getTicketDetailApi,
+  getTicketDocApi,
+  getTicketFlowStepsApi,
   listTicketActionsApi,
   listTicketAttachRulesApi,
   listTicketAttachmentsApi,
@@ -48,7 +53,10 @@ import TicketSteps from './components/ticket-steps.vue';
 import TicketConfirmProgress from './components/ticket-confirm-progress.vue';
 import TicketAttachments from './components/ticket-attachments.vue';
 import TicketBasic from './components/ticket-basic.vue';
+import TicketCases from './components/ticket-cases.vue';
+import TicketCheckItems from './components/ticket-check-items.vue';
 import TicketContent from './components/ticket-content.vue';
+import TicketDocView from './components/ticket-doc.vue';
 import TicketTimeline from './components/ticket-timeline.vue';
 
 const 路由 = useRoute();
@@ -60,6 +68,10 @@ const 单据 = ref<null | TicketDetail>(null);
 const 动作列表 = ref<TicketActionItem[]>([]);
 const 附件列表 = ref<TicketAttachment[]>([]);
 const 缺口列表 = ref<TicketAttachRuleStatus[]>([]);
+/** 步骤条数据：每步的人与材料，悬停时才看，但一次取回十步 */
+const 步骤列表 = ref<TicketFlowStep[]>([]);
+/** 12 节需求文档；BUG/INC 单或接口失败时为 null */
+const 需求文档 = ref<null | TicketDoc>(null);
 const 加载中 = ref(false);
 const 提交中 = ref(false);
 
@@ -72,6 +84,16 @@ const 动作条 = ref<InstanceType<typeof TicketActions> | null>(null);
 
 /** 单据是否已关闭。关闭后附件区与动作区都只读 */
 const 已关闭 = computed(() => 单据.value?.status === 'CLOSED');
+
+/**
+ * 是否显示上线点检卡片。
+ *
+ * 只在点检及之后的环节出现：早期单据看到一张永远空的卡片没意义，
+ * 而点检清单是上线后维护的，提前展示反而误导人以为要现在填。
+ */
+const 显示点检 = computed(() =>
+  ['CLOSED', 'EVALUATING', 'IT_INSPECTION'].includes(单据.value?.status ?? ''),
+);
 
 /** 页面标题 */
 const 页面标题 = computed(() =>
@@ -99,14 +121,20 @@ async function 加载() {
     return;
   }
 
-  const [动作结果, 附件结果, 缺口结果] = await Promise.allSettled([
+  const [动作结果, 附件结果, 缺口结果, 文档结果, 步骤结果] = await Promise.allSettled([
     listTicketActionsApi(单据id.value),
     listTicketAttachmentsApi(单据id.value),
     listTicketAttachRulesApi(单据id.value),
+    getTicketDocApi(单据id.value),
+    getTicketFlowStepsApi(单据id.value),
   ]);
   动作列表.value = 动作结果.status === 'fulfilled' ? 动作结果.value : [];
   附件列表.value = 附件结果.status === 'fulfilled' ? 附件结果.value : [];
   缺口列表.value = 缺口结果.status === 'fulfilled' ? 缺口结果.value : [];
+  // 文档失败不弹错：BUG/INC 单本来就没有需求文档，接口会按「不存在」拒绝
+  需求文档.value = 文档结果.status === 'fulfilled' ? 文档结果.value : null;
+  // 步骤条挂掉只影响悬停提示，步骤本身仍按状态画（步骤为空时整条不渲染）
+  步骤列表.value = 步骤结果.status === 'fulfilled' ? 步骤结果.value : [];
   加载中.value = false;
 }
 
@@ -194,9 +222,12 @@ onMounted(加载);
           </div>
         </div>
 
-        <!-- 主链步骤条：过一步打一个 ✔，未到的置灰，审批环节并入所在步骤 -->
+        <!-- 主链步骤条：过一步打一个 ✔，未到的置灰，审批环节并入所在步骤。
+             鼠标移到节点上看这一步谁在处理、要交什么、还缺什么、交给谁 -->
         <TicketSteps
+          v-if="步骤列表.length > 0"
           class="mt-4 border-t border-gray-200 pt-3 dark:border-gray-700"
+          :steps="步骤列表"
           :status="单据.status"
           :suspended-from="单据.suspendedFrom"
         />
@@ -227,6 +258,9 @@ onMounted(加载);
         </template>
       </Card>
 
+      <!-- 主栏：基本信息 → 需求内容 → 需求文档 → 附件。交付物紧跟需求正文，
+           上传或核对材料时不用横向跳到另一栏。
+           右栏只放流转时间线，与正文并列，读单据时不被长列表打断。 -->
       <Row :gutter="16">
         <Col :lg="16" :xs="24">
           <div class="flex flex-col gap-4">
@@ -236,14 +270,25 @@ onMounted(加载);
             <Card size="small" title="需求内容">
               <TicketContent :detail="单据" />
             </Card>
-            <Card :title="`流转时间线（${单据.timeline.length}）`" size="small">
-              <TicketTimeline :items="单据.timeline" />
+            <Card size="small" title="需求文档">
+              <TicketDocView
+                :doc="需求文档"
+                :ticket-id="单据.id"
+                @refresh="加载"
+              />
             </Card>
-          </div>
-        </Col>
-
-        <Col :lg="8" :xs="24">
-          <div class="flex flex-col gap-4">
+            <!-- 测试用例紧跟需求文档：验收标准在第 10 节，用例逐条对应它，
+                 两块挨着才看得出「哪条标准还没测」 -->
+            <Card size="small" title="测试用例">
+              <TicketCases
+                :acceptance-locked="单据.acceptanceLocked"
+                :ticket-id="单据.id"
+              />
+            </Card>
+            <!-- 上线点检只在点检及之后的环节出现，早期单据不给空卡片 -->
+            <Card v-if="显示点检" size="small" title="上线点检">
+              <TicketCheckItems :ticket-id="单据.id" />
+            </Card>
             <Card size="small" title="附件">
               <TicketAttachments
                 :attachments="附件列表"
@@ -252,6 +297,14 @@ onMounted(加载);
                 :ticket-id="单据.id"
                 @refresh="加载"
               />
+            </Card>
+          </div>
+        </Col>
+
+        <Col :lg="8" :xs="24">
+          <div class="flex flex-col gap-4">
+            <Card :title="`流转时间线（${单据.timeline.length}）`" size="small">
+              <TicketTimeline :items="单据.timeline" />
             </Card>
           </div>
         </Col>

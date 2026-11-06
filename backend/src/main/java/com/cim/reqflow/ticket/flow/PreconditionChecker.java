@@ -1,17 +1,31 @@
 package com.cim.reqflow.ticket.flow;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.cim.reqflow.system.entity.SysDictDataDO;
 import com.cim.reqflow.system.entity.SysUserDO;
+import com.cim.reqflow.system.mapper.SysDictDataMapper;
 import com.cim.reqflow.system.mapper.SysUserMapper;
+import com.cim.reqflow.ticket.doc.DocValidator;
 import com.cim.reqflow.ticket.dto.TicketActionDTO;
+import com.cim.reqflow.ticket.entity.ReqAcceptanceCriteriaDO;
 import com.cim.reqflow.ticket.entity.ReqAttachRuleDO;
 import com.cim.reqflow.ticket.entity.ReqAttachmentDO;
+import com.cim.reqflow.ticket.entity.ReqDocDO;
+import com.cim.reqflow.ticket.entity.ReqTestCaseDO;
 import com.cim.reqflow.ticket.entity.ReqTicketDO;
+import com.cim.reqflow.ticket.mapper.ReqAcceptanceCriteriaMapper;
 import com.cim.reqflow.ticket.mapper.ReqAttachRuleMapper;
 import com.cim.reqflow.ticket.mapper.ReqAttachmentMapper;
+import com.cim.reqflow.ticket.mapper.ReqDocMapper;
+import com.cim.reqflow.ticket.mapper.ReqTestCaseMapper;
+import com.cim.reqflow.system.service.UserAccessService;
+import com.cim.reqflow.ticket.service.CheckItemService;
+import com.cim.reqflow.ticket.testcase.CoverageCalculator;
+import com.cim.reqflow.ticket.vo.CheckItemListVO;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +54,9 @@ public class PreconditionChecker {
     /** 通配符：单据类型与状态的兜底匹配 */
     private static final String WILDCARD = "*";
 
+    /** 字典类型：附件类型。用于把 REQ_DOC 这类码翻成「需求文档」 */
+    private static final String DICT_ATTACH_TYPE = "attach_type";
+
     /** 运行监控结论最小字数，防止只写「正常」两个字 */
     private static final int MIN_MONITOR_NOTE_LENGTH = 20;
 
@@ -64,17 +81,47 @@ public class PreconditionChecker {
     /** 用户表，用于判断实习生 */
     private final SysUserMapper sysUserMapper;
 
+    /** 需求文档表，用于「确认文档」前的完整性校验 */
+    private final ReqDocMapper reqDocMapper;
+
+    /** 字典，用于把附件类型码翻成中文 */
+    private final SysDictDataMapper sysDictDataMapper;
+
+    /** 验收标准，覆盖率的分母 */
+    private final ReqAcceptanceCriteriaMapper reqAcceptanceCriteriaMapper;
+
+    /** 测试用例，覆盖率的分子 */
+    private final ReqTestCaseMapper reqTestCaseMapper;
+
+    /** 点检清单，判断重点功能是否都已点检 */
+    private final CheckItemService checkItemService;
+
     /** 退回计次 */
     private final ReturnCounter returnCounter;
+
+    /** 用户角色查询，派单时用来校验承办人是不是开发角色 */
+    private final UserAccessService userAccessService;
 
     public PreconditionChecker(ReqAttachRuleMapper reqAttachRuleMapper,
                                ReqAttachmentMapper reqAttachmentMapper,
                                SysUserMapper sysUserMapper,
-                               ReturnCounter returnCounter) {
+                               ReqDocMapper reqDocMapper,
+                               SysDictDataMapper sysDictDataMapper,
+                               ReqAcceptanceCriteriaMapper reqAcceptanceCriteriaMapper,
+                               ReqTestCaseMapper reqTestCaseMapper,
+                               CheckItemService checkItemService,
+                               ReturnCounter returnCounter,
+                               UserAccessService userAccessService) {
         this.reqAttachRuleMapper = reqAttachRuleMapper;
         this.reqAttachmentMapper = reqAttachmentMapper;
         this.sysUserMapper = sysUserMapper;
+        this.reqDocMapper = reqDocMapper;
+        this.sysDictDataMapper = sysDictDataMapper;
+        this.reqAcceptanceCriteriaMapper = reqAcceptanceCriteriaMapper;
+        this.reqTestCaseMapper = reqTestCaseMapper;
+        this.checkItemService = checkItemService;
         this.returnCounter = returnCounter;
+        this.userAccessService = userAccessService;
     }
 
     /**
@@ -122,9 +169,81 @@ public class PreconditionChecker {
         blockers.addAll(checkReasonCode(action, request));
         blockers.addAll(checkRequiredFields(ticket, action, request));
         blockers.addAll(checkAttachments(ticket, action));
+        blockers.addAll(checkDocComplete(ticket, action));
+        blockers.addAll(checkCriteriaBeforeLock(ticket, action));
         blockers.addAll(checkReturnLimit(ticket, action, operatorId));
         blockers.addAll(checkInternBan(action, operatorId));
         return blockers;
+    }
+
+    /**
+     * 确认需求文档前，文档必须达到契约 §8.1.7 的四条要求。
+     * <p>
+     * 这条放在渲染阶段也判（不区分 request 是否为空）：文档内容就在库里，
+     * 是「已经能知道的事」。按钮亮着、点下去才说「功能清单还没填」，
+     * 用户得来回两趟；按钮直接置灰并在原因里说明，一次就能看懂要补什么。
+     *
+     * @param ticket 单据
+     * @param action 动作
+     * @return 阻塞项，空表示文档达标
+     */
+    private List<Blocker> checkDocComplete(ReqTicketDO ticket, FlowAction action) {
+        if (action != FlowAction.DOC_CONFIRM) {
+            return List.of();
+        }
+
+        ReqDocDO doc = reqDocMapper.selectOne(Wrappers.<ReqDocDO>lambdaQuery()
+                .eq(ReqDocDO::getTicketId, ticket.getId())
+                .orderByDesc(ReqDocDO::getVersion)
+                .last("limit 1"));
+        if (doc == null) {
+            Map<String, Object> 空 = Map.of("missingSections", List.of(), "messages", List.of());
+            return List.of(new Blocker(Blocker.DOC_INCOMPLETE, "需求文档尚未生成，无法确认", 空));
+        }
+
+        DocValidator.Result 校验 = DocValidator.check(doc.getDocJson());
+        if (校验.passed()) {
+            return List.of();
+        }
+
+        Map<String, Object> details = Map.of(
+                "missingSections", 校验.missingSections(),
+                "messages", 校验.messages());
+        return List.of(new Blocker(Blocker.DOC_INCOMPLETE,
+                "需求文档还差 " + 校验.missingSections().size() + " 处未补全：" + String.join("；", 校验.messages()),
+                details));
+    }
+
+    /**
+     * 设计评审通过前，验收标准必须至少有一条。
+     * <p>
+     * 设计评审三方全过即锁定验收标准（applyParallelPass 里随升级一并置位）。
+     * 锁定时一条标准都没有，会造出「空壳锁定」：之后既不能补标准（已锁死），
+     * 到 UAT 又因覆盖率分母为 0 被拦（COVERAGE_INSUFFICIENT），单据两头堵死。
+     * 踩过的坑：REQ-2026-000009 就锁出了 0 条标准的空壳。
+     * <p>
+     * 渲染阶段也判：标准在库里，是「已经能知道的事」，按钮直接置灰并说明原因，
+     * 不要等评审人点下去才失败。
+     *
+     * @param ticket 单据
+     * @param action 动作
+     * @return 阻塞项，空表示验收标准达标
+     */
+    private List<Blocker> checkCriteriaBeforeLock(ReqTicketDO ticket, FlowAction action) {
+        if (action != FlowAction.DSGN_IT_PASS
+                && action != FlowAction.DSGN_PLATFORM_PASS
+                && action != FlowAction.DSGN_USER_PASS) {
+            return List.of();
+        }
+        Long count = reqAcceptanceCriteriaMapper.selectCount(
+                Wrappers.<ReqAcceptanceCriteriaDO>lambdaQuery()
+                        .eq(ReqAcceptanceCriteriaDO::getTicketId, ticket.getId()));
+        if (count != null && count > 0) {
+            return List.of();
+        }
+        return List.of(new Blocker(Blocker.CRITERIA_EMPTY,
+                "验收标准一条都没有，不能通过设计评审：设计评审通过即锁定验收标准，请先由提出人补充至少一条",
+                Map.of("criteriaCount", 0)));
     }
 
     /**
@@ -135,6 +254,12 @@ public class PreconditionChecker {
      * @return 阻塞项
      */
     private List<Blocker> checkReasonCode(FlowAction action, TicketActionDTO request) {
+        // EVAL_FAIL 挂着一个 return_point，但它不是退回：单据直接关闭、只打负面标记，
+        // 不产生回退边（02 第九节，退回点 ⑨ 不计数）。按「有退回点就要原因分类」去要求，
+        // 「评价不符合」这条路会永远走不通 —— 它的原因由 evalComment 承担。
+        if (action == FlowAction.EVAL_FAIL) {
+            return List.of();
+        }
         if (action.getReturnPoint() == null || request == null) {
             return List.of();
         }
@@ -160,8 +285,15 @@ public class PreconditionChecker {
         boolean checkInput = request != null;
 
         if (checkInput && action == FlowAction.ASSIGN) {
-            if (isBlank(extra.get("assigneeId"))) {
+            Object assigneeValue = extra.get("assigneeId");
+            if (isBlank(assigneeValue)) {
                 blockers.add(Blocker.of(Blocker.FIELD_REQUIRED, "派单必须指定承办人"));
+            } else if (!isDevAssignee(assigneeValue.toString())) {
+                // 只认开发角色。接收动作只对 MIT 开发人员开放，
+                // 派给别的角色会让单据卡死在「待接收」：承办人自己没按钮，
+                // 管理员过不了「是不是承办人」这关，谁都无法推进
+                blockers.add(Blocker.of(Blocker.FIELD_REQUIRED,
+                        "承办人必须是 MIT 开发人员，所选人员没有开发角色"));
             }
             if (toDouble(extra.get("estimatedHours")) <= 0) {
                 blockers.add(Blocker.of(Blocker.FIELD_REQUIRED, "派单必须填写预估工时"));
@@ -188,7 +320,9 @@ public class PreconditionChecker {
             }
         }
 
-        if (action == FlowAction.EVAL_FAIL && isBlank(ticket.getEvalComment())
+        // 必须放在 checkInput 分支里：渲染按钮时还没填原因，
+        // 放外面会让「评价不符合」的按钮永远是灰的 —— 这条评价路径直接走不通
+        if (checkInput && action == FlowAction.EVAL_FAIL && isBlank(ticket.getEvalComment())
                 && isBlank(extra.get("evalComment"))) {
             blockers.add(Blocker.of(Blocker.FIELD_REQUIRED, "评价不符合必须填写原因"));
         }
@@ -213,8 +347,119 @@ public class PreconditionChecker {
             blockers.add(Blocker.of(Blocker.FIELD_REQUIRED, "提 BUG 必须填写标题"));
         }
 
+        blockers.addAll(checkCoverage(ticket, action));
+        blockers.addAll(checkCheckItems(ticket, action));
         blockers.addAll(checkWaiver(ticket, action, extra));
         return blockers;
+    }
+
+    /**
+     * 点检通过前，重点功能必须逐项有结果。
+     * <p>
+     * 清单为空时直接放行：新建系统在清单维护好之前，所有单子都得能走完点检，
+     * 否则上线流程死锁（`02` 4.5 第一条）。空清单这件事由流转层在日志里标
+     * `check_items_empty=1`，留痕但不拦。
+     *
+     * @param ticket 单据
+     * @param action 动作
+     * @return 阻塞项
+     */
+    private List<Blocker> checkCheckItems(ReqTicketDO ticket, FlowAction action) {
+        if (action != FlowAction.INSPECT_PASS) {
+            return List.of();
+        }
+        CheckItemListVO 清单 = checkItemService.list(ticket.getId());
+        if (清单.getEmpty() != null && 清单.getEmpty() == 1) {
+            return List.of();
+        }
+        int 重点数 = 清单.getKeyTotal() == null ? 0 : 清单.getKeyTotal();
+        int 已检数 = 清单.getKeyChecked() == null ? 0 : 清单.getKeyChecked();
+        if (已检数 >= 重点数) {
+            return List.of();
+        }
+        return List.of(new Blocker(Blocker.CHECK_ITEMS_PENDING,
+                "还有 " + (重点数 - 已检数) + " 项重点功能没点检（已检 " + 已检数 + "/" + 重点数 + "）",
+                Map.of("keyTotal", 重点数, "keyChecked", 已检数)));
+    }
+
+    /**
+     * 用例覆盖率硬拦截：不足 100% 不许 UAT 通过（`06` 第五节）。
+     * <p>
+     * 这是本系统唯一一处「AI 环节的结论能卡住流程」的地方，其余 AI 结论都只是建议。
+     * 理由是：验收标准写了却没人拿它逐条测，写多少条都是摆设。
+     * <p>
+     * 已豁免（`uat_waiver=1`）时放行，但豁免理由由 {@link #checkWaiver} 另行校验 ——
+     * 两条规则分开，用户能一次看到「覆盖率不够」和「豁免没写理由」两件事，
+     * 而不是补完理由再被覆盖率拦一次。
+     *
+     * @param ticket 单据
+     * @param action 动作
+     * @return 阻塞项
+     */
+    private List<Blocker> checkCoverage(ReqTicketDO ticket, FlowAction action) {
+        if (action != FlowAction.UAT_PASS) {
+            return List.of();
+        }
+        // 与 int 字面量比较而不是 FLAG_ENABLED：那里是 Integer，两个 Integer 用 == 比的是引用，
+        // 小整数靠缓存碰巧成立，换成大值就是另一个故事
+        if (ticket.getUatWaiver() != null && ticket.getUatWaiver() == 1) {
+            return List.of();
+        }
+
+        List<ReqAcceptanceCriteriaDO> criteria = reqAcceptanceCriteriaMapper.selectList(
+                Wrappers.<ReqAcceptanceCriteriaDO>lambdaQuery()
+                        .eq(ReqAcceptanceCriteriaDO::getTicketId, ticket.getId())
+                        .orderByAsc(ReqAcceptanceCriteriaDO::getSeq));
+        if (criteria.isEmpty()) {
+            return List.of();
+        }
+
+        // 只认最新一轮：旧轮的用例已经过时，拿它算覆盖率会掩盖「标准改了但用例没刷」
+        List<Integer> 轮次表 = 最新轮次(ticket.getId());
+        List<ReqTestCaseDO> 用例 = 轮次表.isEmpty()
+                ? List.of() : reqTestCaseMapper.selectList(
+                        Wrappers.<ReqTestCaseDO>lambdaQuery()
+                                .eq(ReqTestCaseDO::getTicketId, ticket.getId())
+                                .eq(ReqTestCaseDO::getRoundNo, 轮次表.get(0)));
+
+        CoverageCalculator.Result 结果 = CoverageCalculator.calculate(criteria, 用例);
+        if (结果.full()) {
+            return List.of();
+        }
+
+        String 提示 = "用例覆盖率 " + Math.round(结果.rate() * 100) + "%（"
+                + 结果.covered() + "/" + 结果.criteriaTotal() + "）";
+        if (!结果.missingSeqs().isEmpty()) {
+            提示 += "，未覆盖第 " + 结果.missingSeqs().get(0) + " 条：" + 结果.missingContents().get(0);
+        } else {
+            提示 += "，请先生成测试用例";
+        }
+        return List.of(new Blocker(Blocker.COVERAGE_INSUFFICIENT, 提示,
+                Map.of("covered", 结果.covered(),
+                        "total", 结果.criteriaTotal(),
+                        "rate", 结果.rate(),
+                        "missingSeqs", 结果.missingSeqs())));
+    }
+
+    /**
+     * 本单的用例轮次，倒序。
+     *
+     * @param ticketId 单据 ID
+     * @return 轮次列表
+     */
+    private List<Integer> 最新轮次(String ticketId) {
+        List<ReqTestCaseDO> 全部 = reqTestCaseMapper.selectList(
+                Wrappers.<ReqTestCaseDO>lambdaQuery()
+                        .select(ReqTestCaseDO::getRoundNo)
+                        .eq(ReqTestCaseDO::getTicketId, ticketId));
+        List<Integer> 结果 = new ArrayList<>();
+        for (ReqTestCaseDO 一条 : 全部) {
+            if (一条.getRoundNo() != null && !结果.contains(一条.getRoundNo())) {
+                结果.add(一条.getRoundNo());
+            }
+        }
+        结果.sort((甲, 乙) -> 乙 - 甲);
+        return 结果;
     }
 
     /**
@@ -270,19 +515,46 @@ public class PreconditionChecker {
                                 .eq(ReqAttachRuleDO::getTicketType, WILDCARD)));
 
         List<Blocker> blockers = new ArrayList<>();
+        // 字典用到才查：多数动作的附件是齐的，为了一句提示每次都查一遍字典不值当
+        Map<String, String> 类型名 = null;
         for (ReqAttachRuleDO rule : rules) {
             int uploaded = countAttachments(ticket.getId(), rule.getAttachType());
             int required = rule.getMinCount() == null ? 1 : rule.getMinCount();
             if (uploaded >= required) {
                 continue;
             }
+            if (类型名 == null) {
+                类型名 = 附件类型名();
+            }
+            String 显示名 = 类型名.getOrDefault(rule.getAttachType(), rule.getAttachType());
             blockers.add(new Blocker(Blocker.ATTACH_REQUIRED,
-                    "本环节需上传：" + rule.getAttachType(),
+                    "本环节需上传：" + 显示名,
                     Map.of("attachType", rule.getAttachType(),
+                            "attachTypeLabel", 显示名,
                             "minCount", required,
                             "uploaded", uploaded)));
         }
         return blockers;
+    }
+
+    /**
+     * 附件类型码 → 中文名。
+     * <p>
+     * 提示语直接拼码值的话，用户看到的是「本环节需上传：REQ_DOC」，
+     * 得去猜 REQ_DOC 是什么材料 —— 码值是给程序和日志看的，给人看的要有中文。
+     * 查不到字典时回退码值，不因为字典缺一条就报错。
+     *
+     * @return 码值到中文名
+     */
+    private Map<String, String> 附件类型名() {
+        List<SysDictDataDO> 字典 = sysDictDataMapper.selectList(
+                Wrappers.<SysDictDataDO>lambdaQuery()
+                        .eq(SysDictDataDO::getDictType, DICT_ATTACH_TYPE));
+        Map<String, String> 结果 = new HashMap<>();
+        for (SysDictDataDO 项 : 字典) {
+            结果.put(项.getDictValue(), 项.getDictLabel());
+        }
+        return 结果;
     }
 
     /**
@@ -390,6 +662,22 @@ public class PreconditionChecker {
             return List.of();
         }
         return List.of(Blocker.of(Blocker.BAN_INTERN, "实习期内不可执行该操作"));
+    }
+
+    /**
+     * 判断候选人是否持有开发角色，能不能承办这张单。
+     * <p>
+     * 查不到角色时按「不合格」处理：ID 不存在、账号刚被清掉、角色被撤，
+     * 都应该在派单这一步拦住让人重选，而不是放行后卡在待接收。
+     *
+     * @param userId 候选人用户 ID
+     * @return true 表示可以承办
+     */
+    private boolean isDevAssignee(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return false;
+        }
+        return userAccessService.listRoleCodes(userId).contains(FlowRoleSets.MIT_DEV);
     }
 
     private boolean isBlank(Object value) {

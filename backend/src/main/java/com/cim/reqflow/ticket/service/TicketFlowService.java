@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
 import com.cim.reqflow.common.BizCodeException;
+import com.cim.reqflow.common.BizException;
 import com.cim.reqflow.common.constant.CommonConstants;
 import com.cim.reqflow.common.util.IdUtils;
 import com.cim.reqflow.system.entity.ReqSlaConfigDO;
@@ -13,6 +14,8 @@ import com.cim.reqflow.system.mapper.ReqSlaConfigMapper;
 import com.cim.reqflow.system.mapper.SysDictDataMapper;
 import com.cim.reqflow.system.service.UserAccessService;
 import com.cim.reqflow.ticket.dto.TicketActionDTO;
+import com.cim.reqflow.ticket.entity.ReqCheckItemDO;
+import com.cim.reqflow.ticket.entity.ReqDocDO;
 import com.cim.reqflow.ticket.entity.ReqFlowLogDO;
 import com.cim.reqflow.ticket.entity.ReqTicketDO;
 import com.cim.reqflow.ticket.flow.Blocker;
@@ -24,6 +27,8 @@ import com.cim.reqflow.ticket.flow.FlowRegistry;
 import com.cim.reqflow.ticket.flow.PreconditionChecker;
 import com.cim.reqflow.ticket.flow.ReturnCounter;
 import com.cim.reqflow.ticket.flow.TicketStatus;
+import com.cim.reqflow.ticket.mapper.ReqCheckItemMapper;
+import com.cim.reqflow.ticket.mapper.ReqDocMapper;
 import com.cim.reqflow.ticket.mapper.ReqFlowLogMapper;
 import com.cim.reqflow.ticket.mapper.ReqTicketMapper;
 import com.cim.reqflow.ticket.sla.SlaCalculator;
@@ -99,6 +104,12 @@ public class TicketFlowService {
     /** SLA 到期计算 */
     private final SlaCalculator slaCalculator;
 
+    /** 需求文档表，确认文档时回填确认人与时间 */
+    private final ReqDocMapper reqDocMapper;
+
+    /** 点检清单，点检通过时判断是否需要打「清单为空」标记 */
+    private final ReqCheckItemMapper reqCheckItemMapper;
+
     public TicketFlowService(ReqTicketMapper reqTicketMapper,
                              ReqFlowLogMapper reqFlowLogMapper,
                              ReqSlaConfigMapper reqSlaConfigMapper,
@@ -107,7 +118,9 @@ public class TicketFlowService {
                              ConfirmerResolver confirmerResolver,
                              PreconditionChecker preconditionChecker,
                              ReturnCounter returnCounter,
-                             SlaCalculator slaCalculator) {
+                             SlaCalculator slaCalculator,
+                             ReqDocMapper reqDocMapper,
+                             ReqCheckItemMapper reqCheckItemMapper) {
         this.reqTicketMapper = reqTicketMapper;
         this.reqFlowLogMapper = reqFlowLogMapper;
         this.reqSlaConfigMapper = reqSlaConfigMapper;
@@ -117,6 +130,8 @@ public class TicketFlowService {
         this.preconditionChecker = preconditionChecker;
         this.returnCounter = returnCounter;
         this.slaCalculator = slaCalculator;
+        this.reqDocMapper = reqDocMapper;
+        this.reqCheckItemMapper = reqCheckItemMapper;
     }
 
     /**
@@ -131,8 +146,26 @@ public class TicketFlowService {
      */
     public List<ActionVO> listActions(String ticketId, String userId) {
         ReqTicketDO ticket = requireTicket(ticketId);
-        List<String> roleCodes = userAccessService.listRoleCodes(userId);
-        List<String> authCodes = userAccessService.listAuthCodes(userId);
+        return listActions(ticket, userId,
+                userAccessService.listRoleCodes(userId),
+                userAccessService.listAuthCodes(userId));
+    }
+
+    /**
+     * 已持有单据与权限缓存时的动作判定。
+     * <p>
+     * 待办要一次判几十张单，角色与按钮权限每张单各查一次的话，光这两项就是两倍查询量。
+     * 由调用方查一次传进来，判定逻辑仍是同一份 —— 两处各写一套的话，
+     * 「待办里有单、点进去没按钮」这类问题迟早出现。
+     *
+     * @param ticket    单据
+     * @param userId    当前用户
+     * @param roleCodes 用户角色码，调用方一次查好
+     * @param authCodes 用户按钮权限码，调用方一次查好
+     * @return 动作列表
+     */
+    public List<ActionVO> listActions(ReqTicketDO ticket, String userId,
+                                      List<String> roleCodes, List<String> authCodes) {
         ConfirmerResolver.ConfirmerSet confirmers =
                 confirmerResolver.resolve(ticket.getReporterId());
 
@@ -169,6 +202,52 @@ public class TicketFlowService {
             actions.add(vo);
         }
         return actions;
+    }
+
+    /**
+     * 系统动作执行入口：定时器用这条路径推进状态（目前只有「满 7 天转评价」）。
+     * <p>
+     * 与 {@link #execute} 的唯一区别是跳过「该动作只能由系统触发」的反向校验，
+     * 以及角色与归属判定 —— 系统没有角色。状态迁移、时间线、SLA 全部复用同一套代码：
+     * 如果为定时器另写一份 UPDATE，日志形状会和人工操作不一样，报表统计时才发现对不上。
+     * <p>
+     * 不做幂等键：条件更新 {@code WHERE status = 旧状态} 本身就是幂等的，
+     * 同一条单被扫两次，第二次影响行数为 0 会抛 STATE_CONFLICT，由调用方吞掉。
+     *
+     * @param ticketId 单据 ID
+     * @param action   系统动作
+     * @param remark   写进时间线的说明
+     * @return 执行结果
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ActionResultVO executeSystem(String ticketId, FlowAction action, String remark) {
+        ReqTicketDO ticket = requireTicket(ticketId);
+        if (!action.isSystemOnly()) {
+            throw new BizException("动作 " + action.getCode() + " 不是系统动作，不能由定时器触发");
+        }
+        checkStatus(ticket, action, null);
+
+        TicketActionDTO request = new TicketActionDTO();
+        request.setRemark(remark);
+
+        String fromStatus = ticket.getStatus();
+        String toStatus = action.getToStatus();
+        String now = LocalDateTime.now().format(CommonConstants.DATE_TIME_FORMATTER);
+
+        applyTransition(ticket, action, fromStatus, toStatus, request, null, now);
+        updateWithStatusGuard(ticket, fromStatus);
+        writeFlowLog(ticket, action, fromStatus, toStatus, request, null, now);
+        String slaDueAt = refreshSla(ticket, toStatus, now);
+
+        ActionResultVO result = new ActionResultVO();
+        result.setTicketId(ticketId);
+        result.setAction(action.getCode());
+        result.setFromStatus(fromStatus);
+        result.setToStatus(toStatus);
+        result.setStatusLabel(statusLabel(toStatus));
+        result.setEscalated(Boolean.FALSE);
+        result.setSlaDueAt(slaDueAt);
+        return result;
     }
 
     /**
@@ -779,6 +858,9 @@ public class TicketFlowService {
                 ticket.setMitPassed(0);
                 ticket.setPlatformPassed(0);
                 ticket.setSuperiorPassed(0);
+                // 版本锁定：把「谁在什么时候认下了哪一版」记到文档上。
+                // 只回填 req_ticket 会丢掉版本维度，重新生成后就看不出上一版被谁确认过。
+                回填文档确认(ticket.getId(), userId, now);
                 break;
             case SKIP_CONF_MIT:
                 ticket.setMitPassed(1);
@@ -809,6 +891,30 @@ public class TicketFlowService {
                 break;
         }
         applyCloseFields(ticket, action, request, now);
+    }
+
+    /**
+     * 确认需求文档时，在文档上留下确认痕迹。
+     * <p>
+     * 只改最新版：旧版是历史，被人确认过就一直是那个样子，
+     * 重新生成出新版之后还要能看出上一版当时是谁认的。
+     *
+     * @param ticketId 单据 ID
+     * @param userId   确认人
+     * @param now      确认时间
+     */
+    private void 回填文档确认(String ticketId, String userId, String now) {
+        ReqDocDO doc = reqDocMapper.selectOne(Wrappers.<ReqDocDO>lambdaQuery()
+                .eq(ReqDocDO::getTicketId, ticketId)
+                .orderByDesc(ReqDocDO::getVersion)
+                .last("limit 1"));
+        if (doc == null) {
+            return;
+        }
+        doc.setConfirmedAt(now);
+        doc.setConfirmedBy(userId);
+        doc.setUpdatedAt(now);
+        reqDocMapper.updateById(doc);
     }
 
     /**
@@ -891,12 +997,38 @@ public class TicketFlowService {
         log.setAction(action.getCode());
         log.setOperatorId(userId);
         log.setReasonCode(request.getReasonCode());
-        log.setRemark(request.getRemark());
+        log.setRemark(补点检标记(ticket, action, request.getRemark()));
         log.setReturnPoint(action.getReturnPoint());
         log.setReturnSeq(returnSeq > 0 ? returnSeq : null);
         log.setCreatedAt(now);
         reqFlowLogMapper.insert(log);
         return returnSeq;
+    }
+
+    /**
+     * 点检通过且清单为空时，在日志备注里打上 `check_items_empty=1`。
+     * <p>
+     * 空清单放行是刻意的（`02` 4.5），但「这次点检其实什么也没核对」必须留痕 ——
+     * 否则事后审计看到「IT 点检通过」，会以为真的逐项看过。
+     * 不单独立字段：这是备注性质的标记，报表要统计时按 remark 模糊匹配即可。
+     *
+     * @param ticket  单据
+     * @param action  动作
+     * @param 原备注   请求里带的备注
+     * @return 加了标记的备注
+     */
+    private String 补点检标记(ReqTicketDO ticket, FlowAction action, String 原备注) {
+        if (action != FlowAction.INSPECT_PASS) {
+            return 原备注;
+        }
+        Long 清单数 = reqCheckItemMapper.selectCount(
+                Wrappers.<ReqCheckItemDO>lambdaQuery()
+                        .eq(ReqCheckItemDO::getTicketId, ticket.getId()));
+        if (清单数 != null && 清单数 > 0) {
+            return 原备注;
+        }
+        return 原备注 == null || 原备注.trim().isEmpty()
+                ? "check_items_empty=1" : 原备注 + "；check_items_empty=1";
     }
 
     /**
